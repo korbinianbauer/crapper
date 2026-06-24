@@ -58,7 +58,7 @@ def _poll_search_tracker(tracker: dict, source):
     except ValueError:
         max_pages = 5
 
-    results = source.fetch_search(tracker['params'], max_pages=max_pages)
+    results = source.fetch_search(tracker['url'], max_pages=max_pages)
     for r in results:
         lid = db.upsert_listing(
             source.name, r.ad_id, r.url, r.title, r.location, r.image_url, seen_at,

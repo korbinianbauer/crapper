@@ -207,7 +207,6 @@ def index():
         'index.html',
         trackers=trackers,
         cards=cards,
-        search_sources=sources.search_sources(),
         active_count=sum(1 for c in cards if c['active']),
         gone_count=sum(1 for c in cards if not c['active']),
         refreshing=list(_active_refreshes),
@@ -216,81 +215,75 @@ def index():
 
 # ── add / manage trackers ───────────────────────────────────────────────────────
 
-@app.route('/location_search')
-def location_search():
-    q = request.args.get('q', '')
-    source_name = request.args.get('source', '')
-    if source_name not in sources.REGISTRY:
-        return jsonify([])
-    results = sources.get(source_name).search_locations(q)
-    return jsonify([{'id': r.id, 'name': r.name} for r in results])
-
-
-@app.route('/source_fields/<source_name>')
-def source_fields(source_name):
-    if source_name not in sources.REGISTRY:
-        return jsonify({'error': 'unknown source'}), 404
-    source = sources.get(source_name)
-    return jsonify({
-        'name': source.name,
-        'display_name': source.display_name,
-        'supports_search': source.supports_search,
-        'fields': [f.to_dict() for f in source.search_fields()],
-    })
-
-
-@app.route('/add_listing', methods=['POST'])
-@login_required
-@csrf_protect
-def add_listing():
-    url = request.form.get('url', '').strip()
-    label = request.form.get('label', '').strip()
+def _inspect_url(url: str) -> dict:
+    """Recognise a pasted URL and (for searches) count how many ads it would
+    track / (for listings) fetch a quick summary. Returns a JSON-able dict."""
+    url = url.strip()
+    if not url:
+        return {'ok': False, 'error': 'Bitte eine URL einfügen.'}
     source = sources.source_for_url(url)
     if source is None:
-        supported = ', '.join(s.display_name for s in sources.all_sources() if s.supports_listing)
-        flash(f'Diese URL gehört zu keiner unterstützten Einzelanzeigen-Quelle '
-              f'({supported}). Für Suchen nutze „+ Suchbegriff".', 'error')
-        return redirect(url_for('index'))
-    ad_id = source.extract_ad_id(url)
-    existing = db.find_listing_tracker(source.name, ad_id, url)
-    if existing:
-        flash(f'Diese Anzeige wird bereits getrackt: {existing["label"]}.', 'error')
-        return redirect(url_for('index'))
-    if not label:
-        label = ad_id or url
-    tracker_id = db.add_listing_tracker(source.name, label, url)
-    _refresh_async(tracker_id)
-    return redirect(url_for('index'))
+        known = ', '.join(s.display_name for s in sources.all_sources())
+        return {'ok': False, 'error': f'URL nicht erkannt. Unterstützte Seiten: {known}.'}
+    info = source.classify(url)
+    if info is None:
+        return {'ok': False, 'error': f'URL als {source.display_name}-Seite erkannt, '
+                                      f'aber weder Anzeige noch Suche.'}
+    if not info.supported:
+        return {'ok': False, 'source': source.name, 'source_name': source.display_name,
+                'type': info.type, 'error': info.note}
+
+    base = {'ok': True, 'source': source.name, 'source_name': source.display_name,
+            'type': info.type, 'label': info.label}
+    if info.type == 'listing':
+        scraped = source.fetch_listing(url)
+        if scraped is None:
+            return {'ok': False, 'error': 'Anzeige nicht abrufbar (entfernt oder gesperrt).'}
+        base['label'] = scraped.title or info.label
+        base['count'] = 1
+        base['summary'] = (f'Einzelanzeige · {scraped.title or "?"} · '
+                           f'{scraped.price_text or "—"}')
+    else:
+        count, label = source.describe_search(url)
+        if label:
+            base['label'] = label
+        base['count'] = count
+        n = f'~{count}' if count is not None else 'mehrere'
+        base['summary'] = f'Suche · {base["label"]} · {n} Anzeigen'
+    return base
 
 
-@app.route('/add_search', methods=['POST'])
+@app.route('/inspect')
+@login_required
+def inspect():
+    return jsonify(_inspect_url(request.args.get('url', '')))
+
+
+@app.route('/add', methods=['POST'])
 @login_required
 @csrf_protect
-def add_search():
-    source_name = request.form.get('source', '').strip()
-    if source_name not in sources.REGISTRY:
-        flash('Unbekannte Quelle.', 'error')
+def add_tracker():
+    url = request.form.get('url', '').strip()
+    label_in = request.form.get('label', '').strip()
+    source = sources.source_for_url(url)
+    if source is None:
+        flash('URL nicht erkannt — keine unterstützte Quelle.', 'error')
         return redirect(url_for('index'))
-    source = sources.get(source_name)
+    info = source.classify(url)
+    if info is None or not info.supported:
+        flash(info.note if info else 'URL-Typ nicht erkannt.', 'error')
+        return redirect(url_for('index'))
 
-    # Collect the values for this source's declared search fields (+ the *_label
-    # companions that location fields submit for display).
-    params: dict = {}
-    for f in source.search_fields():
-        val = request.form.get(f.name, '').strip()
-        if f.required and not val:
-            flash(f'Bitte „{f.label}" ausfüllen.', 'error')
-            return redirect(url_for('index'))
-        params[f.name] = val
-        if f.type == 'location':
-            params[f.name + '_label'] = request.form.get(f.name + '_label', '').strip()
-
-    existing = db.find_search_tracker(source_name, params)
+    if info.type == 'listing':
+        existing = db.find_listing_tracker(source.name, info.ad_id, url)
+    else:
+        existing = db.find_search_tracker(source.name, url)
     if existing:
-        flash(f'Diese Suche wird bereits getrackt: {existing["label"]}.', 'error')
+        flash(f'Wird bereits getrackt: {existing["label"]}.', 'error')
         return redirect(url_for('index'))
-    label = source.search_label(params)
-    tracker_id = db.add_search_tracker(source_name, label, params)
+
+    label = label_in or info.label or source.display_name
+    tracker_id = db.add_tracker(source.name, info.type, label, url)
     _refresh_async(tracker_id)
     return redirect(url_for('index'))
 

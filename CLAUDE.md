@@ -16,35 +16,49 @@ key is generated (sessions drop on restart).
 
 ## What it is
 
-**crapper** is a multi-source price tracker. The user tracks either single ads
-(by URL) or saved searches on a chosen **source** (site); a daily poll scrapes
-each, archives every price observation, and the frontpage plots each listing's
-price history. Listings that disappear from their source are kept and shown with
-a red border. Kleinanzeigen and ImmoScout24 are implemented; adding a site is a
-matter of writing one `Source` subclass.
+**crapper** is a multi-source price tracker. The user just **pastes a URL** — a
+single ad or a search-results page on any supported site — and crapper auto-detects
+the source and type and creates a tracker. A daily poll scrapes each, archives
+every price observation, and the frontpage plots each listing's price history.
+Listings that disappear from their source are kept and shown with a red border.
+Kleinanzeigen and ImmoScout24 are implemented; adding a site is a matter of
+writing one `Source` subclass.
 
 ## Architecture
 
 ### Sources (the extension point)
 
-A **Source** (`sources/base.py`) is one trackable site. It declares its
-capabilities (`supports_search`, `supports_listing`) and implements only what the
-site offers:
+Everything is **URL-driven**: the user pastes one URL and the source recognises
+whether it's a single listing or a search and extracts all parameters from the
+URL itself — no site-specific input fields. A **Source** (`sources/base.py`)
+implements:
 
-- `matches_url(url)` / `extract_ad_id(url)` / `fetch_listing(url)` — single ads
-- `search_fields()` — describes the search form (list of `SearchField`:
-  type `text` / `select` / `location`) so the frontend renders it generically
-- `search_locations(query)` — autocomplete for `location` fields
-- `search_label(params)` / `fetch_search(params, max_pages)` — run a saved search
+- `matches_url(url)` — does this URL belong to the site
+- `classify(url) -> UrlInfo` — listing vs search, from the URL alone (no network);
+  `UrlInfo` carries `type` / `supported` / `note` / `label` / `ad_id`
+- `fetch_listing(url)` — single ad → `ScrapedListing`
+- `fetch_search(url, max_pages)` — walk the search → `list[ScrapedListing]`
+- `describe_search(url) -> (count, label)` — quick paste-time preview
 
-`search` results and `fetch_listing` both return `ScrapedListing`. Register a new
-source by appending an instance to `_all` in `sources/__init__.py`.
+Register a new source by appending an instance to `_all` in
+`sources/__init__.py`. A source that can't support a URL type returns
+`UrlInfo(supported=False, note=…)` (e.g. ImmoScout single listings).
 
 Implemented sources:
-- **`kleinanzeigen`** — classifieds; search (query + location + radius) **and**
-  single listings. Plain browser-like HTTP, BeautifulSoup parsing.
-- **`immoscout`** — real estate; **search only** (`supports_listing=False`)
-  because `/expose/{id}` detail is WAF-blocked. Uses the mobile JSON gateway.
+- **`kleinanzeigen`** — classifieds; search **and** single listings. Plain
+  browser-like HTTP + BeautifulSoup. Search pagination injects `seite:N` after
+  `/s-`; count comes from the results `<h1>`.
+- **`immoscout`** — real estate; **search only** (`/expose/{id}` is WAF-blocked).
+  A pasted web search URL (`/Suche/de/<land>/<kreis>[/<ort>]/<objektart-slug>` or
+  a `/Suche/radius/…?geocoordinates=lat;lon;r` URL) is parsed and translated into
+  a mobile-API call (`api.mobile.immobilienscout24.de/search`, mobile UA);
+  `totalResults` gives the exact preview count.
+
+### Add flow
+
+`GET /inspect?url=` recognises the URL and returns `{ok, source, type, label,
+count, summary}` (or an error) — the frontend calls it live as the user pastes.
+`POST /add` re-validates and creates the tracker, then kicks off a background poll.
 
 ### Data flow
 
@@ -54,7 +68,7 @@ Implemented sources:
 2. `poller.poll_tracker()` looks up the tracker's source, then:
    - **listing** → `source.fetch_listing(url)`; if gone,
      `db.mark_tracker_listings_inactive()` flags this tracker's membership.
-   - **search** → `source.fetch_search(params)`; each ad is upserted; memberships
+   - **search** → `source.fetch_search(url)`; each ad is upserted; memberships
      not seen this run are flagged via `db.deactivate_missing()`.
 3. `db.upsert_listing(source, ad_id, …)` refreshes/creates the listing (unique by
    `(source, ad_id)`); `db.link_listing()` records the tracker→listing
@@ -70,17 +84,17 @@ Implemented sources:
 |------|------|
 | `app.py` | Flask routes, auth/CSRF, poll-process management, index payload |
 | `db.py` | All SQLite access; `init_db()` (wipe-migrates pre-multi-source schemas) |
-| `sources/base.py` | `Source` ABC + `ScrapedListing` / `LocationResult` / `SearchField` |
-| `sources/__init__.py` | `REGISTRY`, `get`, `all_sources`, `search_sources`, `source_for_url` |
+| `sources/base.py` | `Source` ABC + `ScrapedListing` / `UrlInfo` |
+| `sources/__init__.py` | `REGISTRY`, `get`, `all_sources`, `source_for_url` |
 | `sources/kleinanzeigen.py`, `sources/immoscout.py` | the two sources |
 | `poller.py` | `poll_tracker()` / `poll_all_due()` — orchestrates source → DB |
 | `poll.py` | APScheduler cron loop (separate process) |
-| `templates/index.html` | Listing grid + Plotly charts + add modals (source-driven search form, per-source location autocomplete) |
+| `templates/index.html` | Listing grid + Plotly charts + single add-by-URL modal with live `/inspect` preview |
 
 ### Database schema (`crapper.db`)
 
-- **`trackers`** — one per user request; `source` slug + `type` = `listing`
-  (uses `url`) or `search` (uses `params`, a source-specific JSON blob).
+- **`trackers`** — one per user request; `source` slug + `type` = `listing` /
+  `search`, both defined by their `url` (the search URL is paginated directly).
 - **`listings`** — discovered ads, **unique by `(source, ad_id)`** so an ad
   surfaced by several trackers is stored/shown once. `active=0` means no
   referencing tracker found it in its latest poll.

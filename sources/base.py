@@ -1,11 +1,11 @@
 """Source abstraction: a tracked site (Kleinanzeigen, ImmoScout, …).
 
-A Source knows how to (optionally) resolve locations, run a search, and fetch a
-single listing. Capabilities are declared per source so the rest of the app can
-adapt the UI and poller without special-casing any particular site.
+Everything is URL-driven: the user pastes one URL, the source recognises whether
+it is a single listing or a search and extracts all parameters from the URL
+itself. No site-specific input fields are needed.
 """
 from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -21,63 +21,40 @@ class ScrapedListing:
 
 
 @dataclass
-class LocationResult:
-    """A location autocomplete candidate. `id` is whatever the source needs to
-    run a search for that place (a numeric id, a geocode path, …)."""
-    id: str
-    name: str
-
-
-@dataclass
-class SearchField:
-    """Describes one input of a source's search form so the frontend can render
-    it generically. `type` is one of: 'text', 'select', 'location'."""
-    name: str
-    label: str
-    type: str
-    options: list = field(default_factory=list)   # [[value, label], …] for 'select'
-    placeholder: str = ''
-    required: bool = True
-
-    def to_dict(self) -> dict:
-        return asdict(self)
+class UrlInfo:
+    """What a pasted URL represents, derived from the URL alone (no network)."""
+    type: str                           # 'listing' | 'search'
+    supported: bool = True              # False → recognised but can't be tracked
+    note: str = ''                      # reason shown to the user when unsupported
+    label: str = ''                     # best-effort human label from the URL
+    ad_id: str | None = None            # source-local ad id, for 'listing' URLs
 
 
 class Source(ABC):
-    """Abstract base for a trackable site. Subclass, set the class attributes and
-    implement the methods your site supports, then register it in __init__.py."""
+    """Abstract base for a trackable site. Subclass, set `name`/`display_name`,
+    and implement URL recognition + fetching, then register in __init__.py."""
 
     name: str                  # stable slug + DB key, e.g. 'kleinanzeigen'
     display_name: str          # shown in the UI, e.g. 'Kleinanzeigen'
-    supports_search: bool = True
-    supports_listing: bool = True
 
-    # ── single listings ────────────────────────────────────────────────────
+    @abstractmethod
     def matches_url(self, url: str) -> bool:
-        """True if a pasted single-listing URL belongs to this source."""
-        return False
+        """True if *url* belongs to this site (any type)."""
 
-    def extract_ad_id(self, url: str) -> str | None:
-        """Extract the source-local ad id from a listing URL, if possible."""
-        return None
+    @abstractmethod
+    def classify(self, url: str) -> UrlInfo | None:
+        """Recognise the URL (listing vs search) from the URL alone, or None if
+        it doesn't look like a trackable page on this site."""
 
     def fetch_listing(self, url: str) -> ScrapedListing | None:
-        """Fetch one listing, or None if it has been removed / is unavailable."""
+        """Fetch one listing, or None if removed / unavailable."""
         raise NotImplementedError
 
-    # ── search ───────────────────────────────────────────────────────────────
-    def search_fields(self) -> list[SearchField]:
-        """The inputs of this source's search form (rendered by the frontend)."""
-        return []
-
-    def search_locations(self, query: str) -> list[LocationResult]:
-        """Autocomplete for any 'location' search field."""
-        return []
-
-    def search_label(self, params: dict) -> str:
-        """Human-readable label for a configured search."""
-        return self.display_name
-
-    def fetch_search(self, params: dict, max_pages: int = 5) -> list[ScrapedListing]:
-        """Run the search described by *params* and return every listing found."""
+    def fetch_search(self, url: str, max_pages: int = 5) -> list[ScrapedListing]:
+        """Run the search described by *url* and return every listing found."""
         raise NotImplementedError
+
+    def describe_search(self, url: str) -> tuple[int | None, str]:
+        """Quick preview for a search URL: (total result count, refined label).
+        Count may be None if unknown. Used by the paste-time check."""
+        return None, ''

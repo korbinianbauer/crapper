@@ -1,19 +1,20 @@
 """Kleinanzeigen (kleinanzeigen.de) source — general classifieds.
 
-Plain browser-like HTTP is enough; no JS rendering needed.
-- Location ids: GET /s-ort-empfehlungen.json?query=…
-- Search URL: /s-{keyword}/k0l{locId}r{radius}, paged via /s-seite:{n}/…
+URL-driven. Plain browser-like HTTP is enough; no JS rendering needed.
+- Listing URL:  …/s-anzeige/<slug>/<adId>-<cat>-<x>
+- Search  URL:  …/s-<keyword>/k0l<locId>r<radius>  (also …/s-<ort>/<keyword>/k0…);
+                pagination injects "seite:N" right after "/s-".
 - Listing fields: #viewad-title / #viewad-price / #viewad-locality / og:image.
 """
 import logging
 import re
 import time
-from urllib.parse import quote, urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
 
-from .base import LocationResult, ScrapedListing, SearchField, Source
+from .base import ScrapedListing, Source, UrlInfo
 
 logger = logging.getLogger(__name__)
 
@@ -27,13 +28,12 @@ _HEADERS = {
 }
 _TIMEOUT = 20
 _AD_ID_RE = re.compile(r'/(\d{6,})-\d+-\d+\b')
+_COUNT_RE = re.compile(r'von\s+([\d.]+)\s+Ergebnis')
 _REMOVED_MARKERS = (
     'Die gewünschte Anzeige ist nicht mehr verfügbar',
     'Anzeige nicht gefunden',
     'ist nicht mehr verfügbar',
 )
-_RADIUS_OPTIONS = [['0', 'nur Ort'], ['5', '+5 km'], ['10', '+10 km'],
-                   ['20', '+20 km'], ['50', '+50 km'], ['100', '+100 km']]
 
 
 def _parse_price(text: str | None) -> tuple[float | None, str | None]:
@@ -56,22 +56,30 @@ def _parse_price(text: str | None) -> tuple[float | None, str | None]:
 class KleinanzeigenSource(Source):
     name = 'kleinanzeigen'
     display_name = 'Kleinanzeigen'
-    supports_search = True
-    supports_listing = True
 
     def _get(self, url: str) -> requests.Response:
         return requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
 
-    # ── single listings ────────────────────────────────────────────────────
-    def matches_url(self, url: str) -> bool:
-        return 'kleinanzeigen.de' in url and ('/s-anzeige/' in url or bool(self.extract_ad_id(url)))
-
-    def extract_ad_id(self, url: str) -> str | None:
+    def _extract_ad_id(self, url: str) -> str | None:
         m = _AD_ID_RE.search(url)
         return m.group(1) if m else None
 
+    # ── URL recognition ──────────────────────────────────────────────────────
+    def matches_url(self, url: str) -> bool:
+        return 'kleinanzeigen.de' in url
+
+    def classify(self, url: str) -> UrlInfo | None:
+        path = urlparse(url).path
+        ad_id = self._extract_ad_id(url)
+        if '/s-anzeige/' in url or ad_id:
+            return UrlInfo('listing', label=ad_id or 'Anzeige', ad_id=ad_id)
+        if path.startswith('/s-'):       # all KA search paths start with /s-
+            return UrlInfo('search', label='Kleinanzeigen-Suche')
+        return None
+
+    # ── single listing ───────────────────────────────────────────────────────
     def fetch_listing(self, url: str) -> ScrapedListing | None:
-        ad_id = self.extract_ad_id(url) or url
+        ad_id = self._extract_ad_id(url) or url
         try:
             resp = self._get(url)
         except Exception as e:
@@ -104,44 +112,31 @@ class KleinanzeigenSource(Source):
         )
 
     # ── search ───────────────────────────────────────────────────────────────
-    def search_fields(self) -> list[SearchField]:
-        return [
-            SearchField('query', 'Suchbegriff', 'text', placeholder='z.B. wald'),
-            SearchField('location', 'Ort', 'location', placeholder='z.B. Miesbach'),
-            SearchField('radius', 'Umkreis', 'select', options=_RADIUS_OPTIONS),
-        ]
+    def _page_url(self, url: str, page: int) -> str:
+        if page <= 1:
+            return url
+        # Inject "seite:N" right after the leading "/s-".
+        return re.sub(r'/s-', f'/s-seite:{page}/', url, count=1)
 
-    def search_locations(self, query: str) -> list[LocationResult]:
-        if len(query.strip()) < 2:
-            return []
-        url = f'{_BASE}/s-ort-empfehlungen.json?query={quote(query.strip())}'
+    def _label_from_html(self, html: str) -> str:
+        soup = BeautifulSoup(html, 'html.parser')
+        h1 = soup.select_one('h1')
+        if not h1:
+            return ''
+        text = ' '.join(h1.get_text(' ', strip=True).split())
+        m = re.search(r'Ergebnis(?:se|sen)?\s+für\s+(.*)$', text)
+        return m.group(1).strip() if m else text
+
+    def describe_search(self, url: str) -> tuple[int | None, str]:
         try:
-            resp = self._get(url)
+            resp = self._get(self._page_url(url, 1))
             resp.raise_for_status()
-            data = resp.json()
         except Exception as e:
-            logger.error('KA location lookup failed for %r: %s', query, e)
-            return []
-        out = []
-        for key, name in data.items():
-            loc_id = key.lstrip('_')
-            if loc_id == '0':           # whole of Germany
-                continue
-            out.append(LocationResult(id=loc_id, name=name))
-        return out[:10]
-
-    def search_label(self, params: dict) -> str:
-        radius = params.get('radius', '0')
-        loc = params.get('location_label', '')
-        suffix = f' +{radius} km' if radius and radius != '0' else ''
-        return f'„{params.get("query", "")}" · {loc}{suffix}'
-
-    def _build_url(self, query: str, location_id: str, radius: int, page: int) -> str:
-        kw = quote(query.strip().lower().replace(' ', '-'))
-        loc = f'l{location_id}r{int(radius)}'
-        if page > 1:
-            return f'{_BASE}/s-seite:{page}/{kw}/k0{loc}'
-        return f'{_BASE}/s-{kw}/k0{loc}'
+            logger.error('KA describe_search failed: %s', e)
+            return None, ''
+        m = _COUNT_RE.search(resp.text)
+        count = int(m.group(1).replace('.', '')) if m else None
+        return count, self._label_from_html(resp.text)
 
     def _parse_page(self, html: str) -> list[ScrapedListing]:
         soup = BeautifulSoup(html, 'html.parser')
@@ -153,7 +148,7 @@ class KleinanzeigenSource(Source):
             if not href and link:
                 href = link.get('href', '')
             if not ad_id and href:
-                ad_id = self.extract_ad_id(href)
+                ad_id = self._extract_ad_id(href)
             if not ad_id or not href:
                 continue
             title_el = art.select_one('.text-module-begin a, h2 a, .ellipsis')
@@ -174,21 +169,14 @@ class KleinanzeigenSource(Source):
             ))
         return out
 
-    def fetch_search(self, params: dict, max_pages: int = 5) -> list[ScrapedListing]:
-        query = params.get('query', '')
-        location_id = params.get('location', '')
-        try:
-            radius = int(params.get('radius') or 0)
-        except (ValueError, TypeError):
-            radius = 0
+    def fetch_search(self, url: str, max_pages: int = 5) -> list[ScrapedListing]:
         seen: dict[str, ScrapedListing] = {}
         for page in range(1, max_pages + 1):
-            url = self._build_url(query, location_id, radius, page)
             try:
-                resp = self._get(url)
+                resp = self._get(self._page_url(url, page))
                 resp.raise_for_status()
             except Exception as e:
-                logger.error('KA search failed (%s p%d): %s', query, page, e)
+                logger.error('KA search failed (p%d): %s', page, e)
                 break
             page_results = self._parse_page(resp.text)
             if not page_results:
@@ -196,7 +184,7 @@ class KleinanzeigenSource(Source):
             new = sum(1 for r in page_results if r.ad_id not in seen)
             for r in page_results:
                 seen.setdefault(r.ad_id, r)
-            logger.info('KA search %r p%d: %d ads (%d new)', query, page, len(page_results), new)
+            logger.info('KA search p%d: %d ads (%d new)', page, len(page_results), new)
             if new == 0:
                 break
             if page < max_pages:

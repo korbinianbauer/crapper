@@ -50,8 +50,7 @@
 {% if session.logged_in %}
 <div class="card gap">
   <div class="toolbar">
-    <button class="btn btn-primary" onclick="openModal('listing')">+ Einzelne Anzeige</button>
-    <button class="btn btn-primary" onclick="openModal('search')">+ Suchbegriff</button>
+    <button class="btn btn-primary" onclick="openAdd()">+ Tracker per URL</button>
     <form method="post" action="{{ url_for('refresh_all') }}" style="margin-left:auto;">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
       <button class="btn btn-outline" type="submit">↻ Alle aktualisieren</button>
@@ -138,51 +137,25 @@
   {% endfor %}
 </div>
 
-<!-- Add listing modal -->
-<div class="modal-bg" id="modal-listing">
+<!-- Add tracker modal (single URL → auto-detected source & type) -->
+<div class="modal-bg" id="modal-add">
   <div class="card modal">
-    <h2>Einzelne Anzeige tracken</h2>
-    <form method="post" action="{{ url_for('add_listing') }}">
+    <h2>Tracker hinzufügen</h2>
+    <form method="post" action="{{ url_for('add_tracker') }}" id="add-form">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <input type="hidden" name="label" id="add-label">
       <div class="gap">
-        <label>Anzeigen-URL</label>
-        <input type="url" name="url" required placeholder="https://www.kleinanzeigen.de/s-anzeige/...">
+        <label>URL einfügen (Anzeige oder Suche)</label>
+        <input type="url" name="url" id="add-url" autocomplete="off"
+               placeholder="https://www.kleinanzeigen.de/… oder immobilienscout24.de/Suche/…">
         <div class="muted" style="font-size:.72rem; margin-top:.35rem;">
-          Quelle wird automatisch erkannt. Einzelanzeigen aktuell:
-          {{ search_sources | selectattr('supports_listing') | map(attribute='display_name') | join(', ') }}.
+          Quelle und Typ (Einzelanzeige / Suchliste) werden automatisch erkannt.
         </div>
       </div>
-      <div class="gap">
-        <label>Label (optional)</label>
-        <input type="text" name="label" placeholder="auto from ad id">
-      </div>
+      <div id="add-preview" style="min-height:1.5rem; font-size:.85rem; margin-bottom:1rem;"></div>
       <div class="actions" style="justify-content:flex-end;">
-        <button type="button" class="btn btn-outline" onclick="closeModals()">Cancel</button>
-        <button type="submit" class="btn btn-primary">Track</button>
-      </div>
-    </form>
-  </div>
-</div>
-
-<!-- Add search modal (fields rendered dynamically per source) -->
-<div class="modal-bg" id="modal-search">
-  <div class="card modal">
-    <h2>Suche tracken</h2>
-    <form method="post" action="{{ url_for('add_search') }}" id="search-form">
-      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-      <input type="hidden" name="source" id="search-source-field">
-      <div class="gap">
-        <label>Quelle</label>
-        <select id="search-source-select">
-          {% for s in search_sources %}
-          <option value="{{ s.name }}">{{ s.display_name }}</option>
-          {% endfor %}
-        </select>
-      </div>
-      <div id="search-fields"></div>
-      <div class="actions" style="justify-content:flex-end;">
-        <button type="button" class="btn btn-outline" onclick="closeModals()">Cancel</button>
-        <button type="submit" class="btn btn-primary" id="search-submit">Track</button>
+        <button type="button" class="btn btn-outline" onclick="closeModals()">Abbrechen</button>
+        <button type="submit" class="btn btn-primary" id="add-submit" disabled>Tracken</button>
       </div>
     </form>
   </div>
@@ -253,7 +226,6 @@ CARDS.forEach(c => {
 });
 
 // ── modals ────────────────────────────────────────────────────────────────
-function openModal(kind) { document.getElementById('modal-' + kind).classList.add('open'); }
 function closeModals() {
   document.querySelectorAll('.modal-bg').forEach(m => m.classList.remove('open'));
 }
@@ -261,104 +233,55 @@ document.querySelectorAll('.modal-bg').forEach(m =>
   m.addEventListener('click', e => { if (e.target === m) closeModals(); }));
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModals(); });
 
-// ── source-driven search form ───────────────────────────────────────────────
-const srcSelect = document.getElementById('search-source-select');
-const srcField  = document.getElementById('search-source-field');
-const fieldsBox = document.getElementById('search-fields');
-const searchSubmit = document.getElementById('search-submit');
-// Names of 'location' fields that still need a resolved id before submit.
-let pendingLocations = new Set();
+// ── add-by-URL with live inspect ────────────────────────────────────────────
+const addUrl    = document.getElementById('add-url');
+const addLabel  = document.getElementById('add-label');
+const addSubmit = document.getElementById('add-submit');
+const preview   = document.getElementById('add-preview');
+let inspectTimer = null, inspectSeq = 0;
 
-function updateSubmitState() {
-  searchSubmit.disabled = pendingLocations.size > 0;
+function openAdd() {
+  document.getElementById('modal-add').classList.add('open');
+  addUrl.value = ''; addLabel.value = ''; preview.innerHTML = '';
+  addSubmit.disabled = true;
+  setTimeout(() => addUrl.focus(), 50);
 }
 
-function makeLabel(text) {
-  const l = document.createElement('label');
-  l.textContent = text;
-  return l;
+function setPreview(html, color) {
+  preview.innerHTML = html;
+  preview.style.color = color || 'var(--muted)';
 }
 
-async function loadSourceFields() {
-  const source = srcSelect.value;
-  srcField.value = source;
-  fieldsBox.innerHTML = '';
-  pendingLocations = new Set();
-  let schema;
+async function runInspect() {
+  const url = addUrl.value.trim();
+  addSubmit.disabled = true; addLabel.value = '';
+  if (!url) { setPreview(''); return; }
+  setPreview('<span class="spinner"></span> Prüfe URL…');
+  const seq = ++inspectSeq;
   try {
-    schema = await (await fetch('/source_fields/' + encodeURIComponent(source))).json();
-  } catch (e) { return; }
-
-  (schema.fields || []).forEach(f => {
-    const wrap = document.createElement('div');
-    wrap.className = 'gap';
-    wrap.style.position = 'relative';
-    wrap.appendChild(makeLabel(f.label));
-
-    if (f.type === 'select') {
-      const sel = document.createElement('select');
-      sel.name = f.name;
-      (f.options || []).forEach(([val, lab]) => {
-        const o = document.createElement('option');
-        o.value = val; o.textContent = lab;
-        sel.appendChild(o);
-      });
-      wrap.appendChild(sel);
-    } else if (f.type === 'location') {
-      // visible text input + hidden id + hidden label companion
-      const hiddenId = document.createElement('input');
-      hiddenId.type = 'hidden'; hiddenId.name = f.name;
-      const hiddenLabel = document.createElement('input');
-      hiddenLabel.type = 'hidden'; hiddenLabel.name = f.name + '_label';
-      const text = document.createElement('input');
-      text.type = 'text'; text.autocomplete = 'off';
-      text.placeholder = f.placeholder || '';
-      const box = document.createElement('div');
-      box.className = 'ac-results';
-      wrap.append(text, hiddenId, hiddenLabel, box);
-
-      pendingLocations.add(f.name);
-      let timer = null;
-      text.addEventListener('input', () => {
-        hiddenId.value = ''; hiddenLabel.value = '';
-        pendingLocations.add(f.name); updateSubmitState();
-        const q = text.value.trim();
-        clearTimeout(timer);
-        if (q.length < 2) { box.classList.remove('open'); return; }
-        timer = setTimeout(async () => {
-          try {
-            const items = await (await fetch(
-              '/location_search?source=' + encodeURIComponent(source) +
-              '&q=' + encodeURIComponent(q))).json();
-            box.innerHTML = '';
-            if (!items.length) { box.classList.remove('open'); return; }
-            items.forEach(it => {
-              const d = document.createElement('div');
-              d.className = 'ac-item'; d.textContent = it.name;
-              d.onclick = () => {
-                text.value = it.name; hiddenId.value = it.id; hiddenLabel.value = it.name;
-                pendingLocations.delete(f.name); updateSubmitState();
-                box.classList.remove('open');
-              };
-              box.appendChild(d);
-            });
-            box.classList.add('open');
-          } catch (e) { box.classList.remove('open'); }
-        }, 250);
-      });
-    } else {  // text
-      const inp = document.createElement('input');
-      inp.type = 'text'; inp.name = f.name; inp.placeholder = f.placeholder || '';
-      wrap.appendChild(inp);
-    }
-    fieldsBox.appendChild(wrap);
-  });
-  updateSubmitState();
+    const r = await fetch('/inspect?url=' + encodeURIComponent(url), {cache: 'no-store'});
+    const j = await r.json();
+    if (seq !== inspectSeq) return;            // a newer input superseded this
+    if (!j.ok) { setPreview('⚠ ' + (j.error || 'Fehler'), 'var(--danger)'); return; }
+    const typeLabel = j.type === 'listing' ? '📌 Einzelanzeige' : '🔍 Suchliste';
+    const count = j.count != null
+        ? ` · <b>${j.count}</b> Anzeige${j.count === 1 ? '' : 'n'}`
+        : '';
+    setPreview(`<span class="badge badge-green">${j.source_name}</span> ${typeLabel}` +
+               `<div style="margin-top:.35rem;color:var(--text);">${j.label || ''}${count}</div>`,
+               'var(--muted)');
+    addLabel.value = j.label || '';
+    addSubmit.disabled = false;
+  } catch (e) {
+    if (seq === inspectSeq) setPreview('⚠ Prüfung fehlgeschlagen', 'var(--danger)');
+  }
 }
 
-if (srcSelect) {
-  srcSelect.addEventListener('change', loadSourceFields);
-  loadSourceFields();
+if (addUrl) {
+  const trigger = () => { clearTimeout(inspectTimer); inspectTimer = setTimeout(runInspect, 400); };
+  addUrl.addEventListener('input', trigger);
+  addUrl.addEventListener('paste', () => setTimeout(runInspect, 0));
+  document.getElementById('add-form').addEventListener('submit', () => watchRefresh());
 }
 </script>
 {% endblock %}

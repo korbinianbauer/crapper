@@ -1,6 +1,5 @@
 """All SQLite access for crapper. `init_db()` creates the schema and wipes the
 data tables if it detects an older (pre-multi-source) schema."""
-import json
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -144,28 +143,21 @@ def get_all_settings() -> dict[str, str]:
 
 # ── trackers ──────────────────────────────────────────────────────────────────
 
-def add_listing_tracker(source: str, label: str, url: str) -> int:
+def add_tracker(source: str, type_: str, label: str, url: str) -> int:
     with get_db() as conn:
         cur = conn.execute(
-            "INSERT INTO trackers (source, type, label, url) VALUES (?, 'listing', ?, ?)",
-            (source, label, url),
-        )
-        return cur.lastrowid
-
-
-def add_search_tracker(source: str, label: str, params: dict) -> int:
-    with get_db() as conn:
-        cur = conn.execute(
-            "INSERT INTO trackers (source, type, label, params) VALUES (?, 'search', ?, ?)",
-            (source, label, json.dumps(params)),
+            'INSERT INTO trackers (source, type, label, url) VALUES (?, ?, ?, ?)',
+            (source, type_, label, url),
         )
         return cur.lastrowid
 
 
 def _row_to_tracker(row) -> dict:
-    t = dict(row)
-    t['params'] = json.loads(t['params']) if t.get('params') else {}
-    return t
+    return dict(row)
+
+
+def _normalize_url(url: str) -> str:
+    return url.strip().rstrip('/').split('#')[0].lower()
 
 
 def find_listing_tracker(source: str, ad_id: str | None, url: str) -> dict | None:
@@ -182,30 +174,24 @@ def find_listing_tracker(source: str, ad_id: str | None, url: str) -> dict | Non
             ).fetchone()
             if row:
                 return _row_to_tracker(row)
-        row = conn.execute(
-            "SELECT * FROM trackers WHERE type = 'listing' AND source = ? AND url = ? LIMIT 1",
-            (source, url),
-        ).fetchone()
-        return _row_to_tracker(row) if row else None
+        norm = _normalize_url(url)
+        for row in conn.execute(
+            "SELECT * FROM trackers WHERE type = 'listing' AND source = ?", (source,)
+        ):
+            if _normalize_url(row['url'] or '') == norm:
+                return _row_to_tracker(row)
+        return None
 
 
-def _search_signature(params: dict) -> dict:
-    """The defining parameters of a search, ignoring display-only *_label keys."""
-    return {k: v for k, v in params.items() if not k.endswith('_label')}
-
-
-def find_search_tracker(source: str, params: dict) -> dict | None:
-    """Return an existing search tracker on this source with identical defining
-    parameters (display-only labels ignored)."""
-    sig = _search_signature(params)
+def find_search_tracker(source: str, url: str) -> dict | None:
+    """Return an existing search tracker on this source with the same (normalized) URL."""
+    norm = _normalize_url(url)
     with get_db() as conn:
-        rows = conn.execute(
+        for row in conn.execute(
             "SELECT * FROM trackers WHERE type = 'search' AND source = ?", (source,)
-        ).fetchall()
-    for row in rows:
-        t = _row_to_tracker(row)
-        if _search_signature(t['params']) == sig:
-            return t
+        ):
+            if _normalize_url(row['url'] or '') == norm:
+                return _row_to_tracker(row)
     return None
 
 
