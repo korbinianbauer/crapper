@@ -70,7 +70,7 @@
 <body>
 <nav>
   <a class="brand" href="/"><span class="crap">crap</span>per</a>
-  <span class="sub" style="flex:1;">Kleinanzeigen Preis-Tracker</span>
+  <span class="sub" style="flex:1;">Preis-Tracker für Kleinanzeigen, ImmoScout & mehr</span>
   {% if session.logged_in %}
   <form method="post" action="{{ url_for('logout') }}" style="margin:0;">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
