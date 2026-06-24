@@ -7,7 +7,8 @@ mobile-API search:
                   → searchType=region&geocodes=/de/<land>/<kreis>[/<ort>]
 - Radius search:  /Suche/radius/<objektart-slug>?geocoordinates=<lat>;<lon>;<r>…
                   → searchType=radius&geocoordinates=<lat>;<lon>;<r>
-Single-expose detail (/expose/<id>) is WAF-blocked → listings unsupported.
+Single listings: GET <api>/expose/<id> returns a JSON expose (title in the TITLE
+section, price in TOP_ATTRIBUTES, address in MAP, images in MEDIA).
 """
 import logging
 import re
@@ -24,6 +25,8 @@ _API = 'https://api.mobile.immobilienscout24.de'
 _API_HEADERS = {'User-Agent': 'ImmoScout24_1410_30_._', 'Accept': 'application/json'}
 _TIMEOUT = 25
 _PAGE_SIZE = 20
+_EXPOSE_ID_RE = re.compile(r'/expose/(\d+)')
+_REMOVED_STATES = {'deactivated', 'expired', 'inactive', 'tobedeleted', 'archived', 'deleted'}
 
 # Web URL slug → mobile-API realestatetype
 _SLUG_TO_TYPE = {
@@ -111,10 +114,9 @@ class ImmoScoutSource(Source):
         return f'{rt} · {parsed["location"]}{suffix}'
 
     def classify(self, url: str) -> UrlInfo | None:
-        if '/expose/' in url:
-            return UrlInfo('listing', supported=False,
-                           note='ImmoScout-Einzelanzeigen werden nicht unterstützt — '
-                                'nur Suchlisten (WAF-Schutz auf der Detailseite).')
+        m = _EXPOSE_ID_RE.search(url)
+        if m:
+            return UrlInfo('listing', label=f'Exposé {m.group(1)}', ad_id=m.group(1))
         if '/Suche/' in url or '/suche/' in url:
             parsed = self._parse_search_url(url)
             if parsed is None:
@@ -123,6 +125,74 @@ class ImmoScoutSource(Source):
                                     '(Objektart unbekannt).')
             return UrlInfo('search', label=self._label(parsed))
         return None
+
+    # ── single listing ───────────────────────────────────────────────────────
+    def fetch_listing(self, url: str) -> ScrapedListing | None:
+        m = _EXPOSE_ID_RE.search(url)
+        if not m:
+            return None
+        ad_id = m.group(1)
+        try:
+            resp = requests.get(f'{_API}/expose/{ad_id}', headers=_API_HEADERS, timeout=_TIMEOUT)
+        except Exception as e:
+            logger.error('IS24 expose fetch error %s: %s', ad_id, e)
+            return None
+        if resp.status_code == 404:
+            return None
+        if resp.status_code != 200:
+            logger.warning('IS24 expose %s HTTP %s', ad_id, resp.status_code)
+            return None
+        try:
+            data = resp.json()
+        except ValueError:
+            return None
+        if 'sections' not in data or 'header' not in data:
+            return None
+        state = (data['header'].get('publicationState') or '').lower()
+        if state in _REMOVED_STATES:      # deactivated / expired → treat as removed
+            return None
+        return self._parse_expose(ad_id, data)
+
+    def _parse_expose(self, ad_id: str, data: dict) -> ScrapedListing:
+        # Index sections by type (some types repeat; first wins for what we need).
+        secs: dict[str, dict] = {}
+        for s in data.get('sections', []):
+            t = s.get('type')
+            if t and t not in secs:
+                secs[t] = s
+
+        title = (secs.get('TITLE', {}).get('title')
+                 or data['header'].get('title'))
+
+        # Price: the highlighted top attribute (Kaltmiete / Kaufpreis), else first € one.
+        price = price_text = None
+        attrs = secs.get('TOP_ATTRIBUTES', {}).get('attributes', [])
+        chosen = next((a for a in attrs if a.get('highlighted') and '€' in (a.get('text') or '')),
+                      next((a for a in attrs if '€' in (a.get('text') or '')), None))
+        if chosen:
+            price, price_text = _parse_price(chosen.get('text'))
+
+        # Location: MAP address lines.
+        mp = secs.get('MAP', {})
+        location = ' '.join(x for x in (mp.get('addressLine1'), mp.get('addressLine2')) if x) or None
+
+        # Image: first picture in the MEDIA gallery.
+        image_url = None
+        for item in secs.get('MEDIA', {}).get('media', []):
+            pic = item.get('previewImageUrl') or item.get('fullImageUrl')
+            if pic:
+                image_url = pic
+                break
+
+        return ScrapedListing(
+            ad_id=str(ad_id),
+            url=f'https://www.immobilienscout24.de/expose/{ad_id}',
+            title=title.strip() if title else None,
+            location=location,
+            image_url=image_url,
+            price=price,
+            price_text=price_text,
+        )
 
     # ── search ───────────────────────────────────────────────────────────────
     def _api_get(self, parsed: dict, page: int) -> dict | None:
