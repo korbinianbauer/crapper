@@ -1,0 +1,364 @@
+{% extends "base.html" %}
+{% block title %}crapper · tracked listings{% endblock %}
+{% block head %}
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+<style>
+  .toolbar { display:flex; flex-wrap:wrap; gap:1rem; align-items:flex-end; }
+  .toolbar .field { flex:1; min-width:140px; }
+  .summary { display:flex; gap:1.25rem; margin:.25rem 0 1.25rem; color:var(--muted); font-size:.9rem; }
+  .summary b { color:var(--text); }
+
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); gap:1.1rem; }
+  .listing { display:flex; flex-direction:column; gap:.6rem; border:1px solid var(--border); }
+  .listing.gone { border:2px solid var(--danger); }
+  .listing .head { display:flex; gap:.75rem; }
+  .listing img.thumb { width:84px; height:84px; object-fit:cover; border-radius:8px;
+                       background:var(--surface-2); flex-shrink:0; }
+  .listing .title { font-weight:600; font-size:.95rem; line-height:1.25; }
+  .listing .title a { color:var(--text); text-decoration:none; }
+  .listing .title a:hover { color:var(--primary); }
+  .listing .meta { font-size:.78rem; color:var(--muted); margin-top:.2rem; }
+  .listing .price { font-size:1.25rem; font-weight:700; color:var(--primary); }
+  .listing.gone .price { color:var(--muted); }
+  .listing .row { display:flex; align-items:center; justify-content:space-between; gap:.5rem; }
+  .listing .chart { width:100%; height:140px; }
+  .listing .tracker-tag { font-size:.7rem; color:var(--muted); }
+  .actions { display:flex; gap:.4rem; }
+
+  .modal-bg { display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:50;
+              align-items:center; justify-content:center; }
+  .modal-bg.open { display:flex; }
+  .modal { width:100%; max-width:440px; }
+  .ac-results { border:1px solid var(--border); border-radius:8px; margin-top:.35rem;
+                overflow:hidden; display:none; }
+  .ac-results.open { display:block; }
+  .ac-item { padding:.5rem .75rem; cursor:pointer; font-size:.88rem; }
+  .ac-item:hover, .ac-item.sel { background:var(--surface-2); }
+  .tabs { display:flex; gap:.5rem; margin-bottom:1rem; }
+  .tabs button { flex:1; }
+
+  #poll-banner { display:none; position:fixed; left:50%; bottom:1.25rem; transform:translateX(-50%);
+                 z-index:60; background:var(--surface); border:1px solid var(--primary);
+                 color:var(--text); padding:.6rem 1.1rem; border-radius:999px; box-shadow:var(--shadow);
+                 font-size:.85rem; align-items:center; gap:.55rem; }
+  #poll-banner.show { display:flex; }
+</style>
+{% endblock %}
+
+{% block content %}
+
+{% if session.logged_in %}
+<div class="card gap">
+  <div class="toolbar">
+    <button class="btn btn-primary" onclick="openModal('listing')">+ Einzelne Anzeige</button>
+    <button class="btn btn-primary" onclick="openModal('search')">+ Suchbegriff</button>
+    <form method="post" action="{{ url_for('refresh_all') }}" style="margin-left:auto;">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <button class="btn btn-outline" type="submit">↻ Alle aktualisieren</button>
+    </form>
+  </div>
+</div>
+{% else %}
+<div class="card gap muted">Sign in to add or refresh trackers.</div>
+{% endif %}
+
+{% if session.logged_in and trackers %}
+<details class="card gap">
+  <summary style="cursor:pointer; font-weight:600;">Tracker verwalten ({{ trackers|length }})</summary>
+  <table style="width:100%; margin-top:.85rem; border-collapse:collapse; font-size:.85rem;">
+    <tbody>
+      {% for t in trackers %}
+      <tr style="border-top:1px solid var(--border);">
+        <td style="padding:.5rem .4rem;">{% if t.type == 'search' %}🔍{% else %}📌{% endif %}</td>
+        <td style="padding:.5rem .4rem; width:100%;">
+          <span class="badge badge-grey">{{ t.source_name }}</span> {{ t.label }}
+          {% if t.type == 'listing' %}<div class="muted" style="font-size:.72rem; word-break:break-all;">{{ t.url }}</div>{% endif %}
+        </td>
+        <td style="padding:.5rem .4rem; white-space:nowrap;">
+          <span class="badge {{ 'badge-green' if t.listing_count else 'badge-grey' }}">{{ t.listing_count }} listing{{ '' if t.listing_count == 1 else 's' }}</span>
+        </td>
+        <td style="padding:.5rem .4rem; text-align:right;">
+          <form method="post" action="{{ url_for('refresh_tracker', tracker_id=t.id) }}"
+                style="display:inline;" onsubmit="fetch(this.action,{method:'POST',headers:{'X-CSRF-Token':'{{ csrf_token() }}'}}).then(watchRefresh);this.querySelector('button').textContent='…';return false;">
+            <button class="btn btn-outline btn-sm" type="submit">↻</button>
+          </form>
+          <form method="post" action="{{ url_for('delete_tracker', tracker_id=t.id) }}"
+                style="display:inline;" onsubmit="return confirm('Delete this tracker?');">
+            <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+            <button class="btn btn-danger btn-sm" type="submit">✕</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</details>
+{% endif %}
+
+<div class="summary">
+  <span><b>{{ cards|length }}</b> listings</span>
+  <span><b>{{ active_count }}</b> active</span>
+  <span><b style="color:var(--danger);">{{ gone_count }}</b> disappeared</span>
+  <span><b>{{ trackers|length }}</b> trackers</span>
+</div>
+
+{% if not cards %}
+<div class="card" style="text-align:center; padding:3rem;">
+  <p class="muted">No listings tracked yet.{% if session.logged_in %} Add a listing URL or a search term above.{% endif %}</p>
+</div>
+{% endif %}
+
+<div class="grid">
+  {% for c in cards %}
+  <div class="listing card {{ 'gone' if not c.active }}" data-id="{{ c.id }}">
+    <div class="head">
+      {% if c.image_url %}<img class="thumb" src="{{ c.image_url }}" loading="lazy" alt="">
+      {% else %}<div class="thumb"></div>{% endif %}
+      <div style="flex:1; min-width:0;">
+        <div class="title"><a href="{{ c.url }}" target="_blank" rel="noopener">{{ c.title }}</a></div>
+        <div class="meta">{{ c.location or '—' }}</div>
+        <div class="meta tracker-tag">
+          <span class="badge badge-grey">{{ c.source_name }}</span>
+          {% if c.is_search %}🔍{% endif %}{% if c.is_listing %}📌{% endif %} {{ c.tracker_labels }}
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <span class="price">{{ c.current_price }}</span>
+      {% if c.active %}
+        <span class="badge badge-green">aktiv</span>
+      {% else %}
+        <span class="badge badge-red">verschwunden</span>
+      {% endif %}
+    </div>
+
+    <div class="chart" id="chart-{{ c.id }}"></div>
+  </div>
+  {% endfor %}
+</div>
+
+<!-- Add listing modal -->
+<div class="modal-bg" id="modal-listing">
+  <div class="card modal">
+    <h2>Einzelne Anzeige tracken</h2>
+    <form method="post" action="{{ url_for('add_listing') }}">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <div class="gap">
+        <label>Anzeigen-URL</label>
+        <input type="url" name="url" required placeholder="https://www.kleinanzeigen.de/s-anzeige/...">
+        <div class="muted" style="font-size:.72rem; margin-top:.35rem;">
+          Quelle wird automatisch erkannt. Einzelanzeigen aktuell:
+          {{ search_sources | selectattr('supports_listing') | map(attribute='display_name') | join(', ') }}.
+        </div>
+      </div>
+      <div class="gap">
+        <label>Label (optional)</label>
+        <input type="text" name="label" placeholder="auto from ad id">
+      </div>
+      <div class="actions" style="justify-content:flex-end;">
+        <button type="button" class="btn btn-outline" onclick="closeModals()">Cancel</button>
+        <button type="submit" class="btn btn-primary">Track</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Add search modal (fields rendered dynamically per source) -->
+<div class="modal-bg" id="modal-search">
+  <div class="card modal">
+    <h2>Suche tracken</h2>
+    <form method="post" action="{{ url_for('add_search') }}" id="search-form">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <input type="hidden" name="source" id="search-source-field">
+      <div class="gap">
+        <label>Quelle</label>
+        <select id="search-source-select">
+          {% for s in search_sources %}
+          <option value="{{ s.name }}">{{ s.display_name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div id="search-fields"></div>
+      <div class="actions" style="justify-content:flex-end;">
+        <button type="button" class="btn btn-outline" onclick="closeModals()">Cancel</button>
+        <button type="submit" class="btn btn-primary" id="search-submit">Track</button>
+      </div>
+    </form>
+  </div>
+</div>
+<div id="poll-banner"><span class="spinner"></span> Aktualisiere Anzeigen… die Seite lädt automatisch neu.</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const CARDS = {{ cards|tojson }};
+const REFRESHING = {{ refreshing|tojson }};
+
+// ── auto-reload while a poll is running ─────────────────────────────────────
+let _watching = false;
+function watchRefresh() {
+  if (_watching) return;
+  _watching = true;
+  document.getElementById('poll-banner').classList.add('show');
+  const tick = async () => {
+    try {
+      const r = await fetch('/refresh_status', {cache: 'no-store'});
+      const j = await r.json();
+      if (!j.running || j.running.length === 0) { location.reload(); return; }
+    } catch (e) { /* keep trying */ }
+    setTimeout(tick, 2000);
+  };
+  setTimeout(tick, 2000);
+}
+if (REFRESHING && REFRESHING.length) watchRefresh();
+
+// ── price charts ──────────────────────────────────────────────────────────
+function fmtDate(iso) {
+  const d = new Date(iso.endsWith('Z') ? iso : iso + 'Z');
+  return d;
+}
+CARDS.forEach(c => {
+  const el = document.getElementById('chart-' + c.id);
+  if (!el) return;
+  const pts = c.history.filter(h => h.price !== null);
+  const gone = !c.active;
+  const color = gone ? '#ef4444' : '#22c55e';
+
+  if (pts.length === 0) {
+    el.innerHTML = '<div style="color:#94a3b8;font-size:.78rem;padding:1rem 0;">' +
+                   'Kein Preisverlauf (kein numerischer Preis)</div>';
+    return;
+  }
+  const xs = pts.map(p => fmtDate(p.t));
+  const ys = pts.map(p => p.price);
+  // Repeat the last point at "now" so a flat price still draws a line.
+  if (pts.length === 1) { xs.push(new Date()); ys.push(ys[0]); }
+
+  Plotly.newPlot(el, [{
+    x: xs, y: ys,
+    type: 'scatter', mode: 'lines+markers',
+    line: {color: color, width: 2, shape: 'hv'},
+    marker: {size: 5, color: color},
+    hovertemplate: '%{y:,.0f} €<br>%{x|%d.%m.%Y}<extra></extra>',
+  }], {
+    margin: {l: 48, r: 10, t: 6, b: 24},
+    paper_bgcolor: 'rgba(0,0,0,0)',
+    plot_bgcolor: 'rgba(0,0,0,0)',
+    font: {color: '#94a3b8', size: 10},
+    xaxis: {gridcolor: '#334155', showgrid: false},
+    yaxis: {gridcolor: '#334155', tickformat: ',.0f', ticksuffix: ' €'},
+    showlegend: false,
+  }, {displayModeBar: false, responsive: true});
+});
+
+// ── modals ────────────────────────────────────────────────────────────────
+function openModal(kind) { document.getElementById('modal-' + kind).classList.add('open'); }
+function closeModals() {
+  document.querySelectorAll('.modal-bg').forEach(m => m.classList.remove('open'));
+}
+document.querySelectorAll('.modal-bg').forEach(m =>
+  m.addEventListener('click', e => { if (e.target === m) closeModals(); }));
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModals(); });
+
+// ── source-driven search form ───────────────────────────────────────────────
+const srcSelect = document.getElementById('search-source-select');
+const srcField  = document.getElementById('search-source-field');
+const fieldsBox = document.getElementById('search-fields');
+const searchSubmit = document.getElementById('search-submit');
+// Names of 'location' fields that still need a resolved id before submit.
+let pendingLocations = new Set();
+
+function updateSubmitState() {
+  searchSubmit.disabled = pendingLocations.size > 0;
+}
+
+function makeLabel(text) {
+  const l = document.createElement('label');
+  l.textContent = text;
+  return l;
+}
+
+async function loadSourceFields() {
+  const source = srcSelect.value;
+  srcField.value = source;
+  fieldsBox.innerHTML = '';
+  pendingLocations = new Set();
+  let schema;
+  try {
+    schema = await (await fetch('/source_fields/' + encodeURIComponent(source))).json();
+  } catch (e) { return; }
+
+  (schema.fields || []).forEach(f => {
+    const wrap = document.createElement('div');
+    wrap.className = 'gap';
+    wrap.style.position = 'relative';
+    wrap.appendChild(makeLabel(f.label));
+
+    if (f.type === 'select') {
+      const sel = document.createElement('select');
+      sel.name = f.name;
+      (f.options || []).forEach(([val, lab]) => {
+        const o = document.createElement('option');
+        o.value = val; o.textContent = lab;
+        sel.appendChild(o);
+      });
+      wrap.appendChild(sel);
+    } else if (f.type === 'location') {
+      // visible text input + hidden id + hidden label companion
+      const hiddenId = document.createElement('input');
+      hiddenId.type = 'hidden'; hiddenId.name = f.name;
+      const hiddenLabel = document.createElement('input');
+      hiddenLabel.type = 'hidden'; hiddenLabel.name = f.name + '_label';
+      const text = document.createElement('input');
+      text.type = 'text'; text.autocomplete = 'off';
+      text.placeholder = f.placeholder || '';
+      const box = document.createElement('div');
+      box.className = 'ac-results';
+      wrap.append(text, hiddenId, hiddenLabel, box);
+
+      pendingLocations.add(f.name);
+      let timer = null;
+      text.addEventListener('input', () => {
+        hiddenId.value = ''; hiddenLabel.value = '';
+        pendingLocations.add(f.name); updateSubmitState();
+        const q = text.value.trim();
+        clearTimeout(timer);
+        if (q.length < 2) { box.classList.remove('open'); return; }
+        timer = setTimeout(async () => {
+          try {
+            const items = await (await fetch(
+              '/location_search?source=' + encodeURIComponent(source) +
+              '&q=' + encodeURIComponent(q))).json();
+            box.innerHTML = '';
+            if (!items.length) { box.classList.remove('open'); return; }
+            items.forEach(it => {
+              const d = document.createElement('div');
+              d.className = 'ac-item'; d.textContent = it.name;
+              d.onclick = () => {
+                text.value = it.name; hiddenId.value = it.id; hiddenLabel.value = it.name;
+                pendingLocations.delete(f.name); updateSubmitState();
+                box.classList.remove('open');
+              };
+              box.appendChild(d);
+            });
+            box.classList.add('open');
+          } catch (e) { box.classList.remove('open'); }
+        }, 250);
+      });
+    } else {  // text
+      const inp = document.createElement('input');
+      inp.type = 'text'; inp.name = f.name; inp.placeholder = f.placeholder || '';
+      wrap.appendChild(inp);
+    }
+    fieldsBox.appendChild(wrap);
+  });
+  updateSubmitState();
+}
+
+if (srcSelect) {
+  srcSelect.addEventListener('change', loadSourceFields);
+  loadSourceFields();
+}
+</script>
+{% endblock %}

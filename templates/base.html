@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}crapper · Preis-Tracker{% endblock %}</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0f172a;
+      --surface: #1e293b;
+      --surface-2: #273449;
+      --border: #334155;
+      --primary: #22c55e;
+      --primary-dark: #16a34a;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --danger: #ef4444;
+      --radius: 12px;
+      --shadow: 0 4px 14px rgba(0,0,0,.35);
+    }
+    body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg);
+           color: var(--text); min-height: 100vh; }
+
+    nav { background: var(--surface); border-bottom: 1px solid var(--border);
+          padding: .9rem 1.5rem; display: flex; align-items: center; gap: 1rem; }
+    nav a.brand { color: var(--text); text-decoration: none; font-weight: 700; font-size: 1.2rem; }
+    nav .brand .crap { color: var(--primary); }
+    nav .sub { color: var(--muted); font-size: .82rem; }
+
+    main { max-width: 1280px; margin: 1.75rem auto; padding: 0 1.25rem; }
+
+    .card { background: var(--surface); border: 1px solid var(--border);
+            border-radius: var(--radius); box-shadow: var(--shadow); padding: 1.1rem; }
+
+    .btn { display: inline-flex; align-items: center; gap: .4rem; padding: .5rem 1rem;
+           border-radius: 8px; border: none; cursor: pointer; font-size: .875rem;
+           font-weight: 600; text-decoration: none; transition: filter .15s, background .15s; }
+    .btn:hover { filter: brightness(1.1); }
+    .btn-primary { background: var(--primary); color: #06210f; }
+    .btn-outline { background: transparent; color: var(--text); border: 1px solid var(--border); }
+    .btn-danger  { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+    .btn-sm { padding: .3rem .65rem; font-size: .78rem; }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner { display: inline-block; width: .85em; height: .85em;
+               border: 2px solid currentColor; border-top-color: transparent;
+               border-radius: 50%; animation: spin .7s linear infinite; vertical-align: middle; }
+
+    input, select { font: inherit; color: var(--text); background: var(--surface-2);
+                    border: 1px solid var(--border); border-radius: 8px; padding: .55rem .75rem;
+                    outline: none; width: 100%; }
+    input:focus, select:focus { border-color: var(--primary); }
+    label { display: block; font-size: .78rem; color: var(--muted); margin-bottom: .3rem;
+            text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
+
+    h1 { font-size: 1.4rem; margin-bottom: .25rem; }
+    h2 { font-size: 1.1rem; margin-bottom: .9rem; }
+    .muted { color: var(--muted); }
+    .gap { margin-bottom: 1.5rem; }
+
+    .badge { display: inline-block; padding: .12rem .5rem; border-radius: 20px;
+             font-size: .7rem; font-weight: 700; }
+    .badge-green { background: rgba(34,197,94,.18); color: var(--primary); }
+    .badge-red   { background: rgba(239,68,68,.18); color: var(--danger); }
+    .badge-grey  { background: var(--surface-2); color: var(--muted); }
+  </style>
+  {% block head %}{% endblock %}
+</head>
+<body>
+<nav>
+  <a class="brand" href="/"><span class="crap">crap</span>per</a>
+  <span class="sub" style="flex:1;">Kleinanzeigen Preis-Tracker</span>
+  {% if session.logged_in %}
+  <form method="post" action="{{ url_for('logout') }}" style="margin:0;">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <button class="btn btn-outline btn-sm" type="submit">Sign out</button>
+  </form>
+  {% else %}
+  <a class="btn btn-outline btn-sm" href="{{ url_for('login') }}">Sign in</a>
+  {% endif %}
+</nav>
+
+<main>
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, msg in messages %}
+    <div class="card gap" style="border-color:{{ 'var(--danger)' if category=='error' else 'var(--primary)' }};
+         color:{{ 'var(--danger)' if category=='error' else 'var(--text)' }};">{{ msg }}</div>
+    {% endfor %}
+  {% endwith %}
+  {% block content %}{% endblock %}
+</main>
+
+{% block scripts %}{% endblock %}
+</body>
+</html>
