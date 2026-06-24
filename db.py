@@ -94,7 +94,17 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_tl_listing ON tracker_listings(listing_id);
             CREATE INDEX IF NOT EXISTS idx_price_listing ON price_history(listing_id, observed_at);
         ''')
+        _add_columns_if_missing(conn, 'listings', {
+            'hidden': 'INTEGER NOT NULL DEFAULT 0',   # hidden from the frontpage by the user
+        })
         _init_default_settings(conn)
+
+
+def _add_columns_if_missing(conn, table: str, columns: dict[str, str]):
+    existing = {row[1] for row in conn.execute(f'PRAGMA table_info({table})')}
+    for col, typedef in columns.items():
+        if col not in existing:
+            conn.execute(f'ALTER TABLE {table} ADD COLUMN {col} {typedef}')
 
 
 def _init_default_settings(conn):
@@ -300,21 +310,37 @@ def get_tracker_listing_counts() -> dict[int, int]:
             'SELECT tracker_id, COUNT(*) FROM tracker_listings GROUP BY tracker_id')}
 
 
+_LISTING_SELECT = '''
+    SELECT l.*,
+           (SELECT GROUP_CONCAT(t.label, ' · ')
+              FROM tracker_listings tl JOIN trackers t ON t.id = tl.tracker_id
+             WHERE tl.listing_id = l.id)          AS tracker_labels,
+           (SELECT GROUP_CONCAT(DISTINCT t.type)
+              FROM tracker_listings tl JOIN trackers t ON t.id = tl.tracker_id
+             WHERE tl.listing_id = l.id)          AS tracker_types
+    FROM listings l
+'''
+
+
 def get_all_listings() -> list[dict]:
-    """All distinct listings, active-first, each annotated with the labels/types
-    of every tracker that surfaced it."""
+    """Visible (non-hidden) distinct listings, active-first, each annotated with
+    the labels/types of every tracker that surfaced it."""
     with get_db() as conn:
-        return [dict(r) for r in conn.execute('''
-            SELECT l.*,
-                   (SELECT GROUP_CONCAT(t.label, ' · ')
-                      FROM tracker_listings tl JOIN trackers t ON t.id = tl.tracker_id
-                     WHERE tl.listing_id = l.id)          AS tracker_labels,
-                   (SELECT GROUP_CONCAT(DISTINCT t.type)
-                      FROM tracker_listings tl JOIN trackers t ON t.id = tl.tracker_id
-                     WHERE tl.listing_id = l.id)          AS tracker_types
-            FROM listings l
-            ORDER BY l.active DESC, l.id
-        ''')]
+        return [dict(r) for r in conn.execute(
+            _LISTING_SELECT + ' WHERE COALESCE(l.hidden, 0) = 0 ORDER BY l.active DESC, l.id')]
+
+
+def get_hidden_listings() -> list[dict]:
+    """Listings the user has hidden from the frontpage (for the manage panel)."""
+    with get_db() as conn:
+        return [dict(r) for r in conn.execute(
+            _LISTING_SELECT + ' WHERE l.hidden = 1 ORDER BY l.id')]
+
+
+def set_listing_hidden(listing_id: int, hidden: bool):
+    with get_db() as conn:
+        conn.execute('UPDATE listings SET hidden = ? WHERE id = ?',
+                     (1 if hidden else 0, listing_id))
 
 
 # ── price history ─────────────────────────────────────────────────────────────

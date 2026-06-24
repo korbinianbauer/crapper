@@ -94,6 +94,31 @@
 </details>
 {% endif %}
 
+{% if session.logged_in and hidden_listings %}
+<details class="card gap">
+  <summary style="cursor:pointer; font-weight:600;">Versteckte Inserate ({{ hidden_listings|length }})</summary>
+  <table style="width:100%; margin-top:.85rem; border-collapse:collapse; font-size:.85rem;">
+    <tbody>
+      {% for h in hidden_listings %}
+      <tr style="border-top:1px solid var(--border);">
+        <td style="padding:.5rem .4rem; width:100%;">
+          <span class="badge badge-grey">{{ h.source_name }}</span>
+          <a href="{{ h.url }}" target="_blank" rel="noopener" style="color:var(--text);">{{ h.title }}</a>
+          <div class="muted" style="font-size:.72rem;">{{ h.location or '—' }}</div>
+        </td>
+        <td style="padding:.5rem .4rem; text-align:right;">
+          <form method="post" action="{{ url_for('unhide_listing', listing_id=h.id) }}" style="display:inline;">
+            <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+            <button class="btn btn-outline btn-sm" type="submit">👁 Einblenden</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</details>
+{% endif %}
+
 <div class="summary">
   <span><b>{{ cards|length }}</b> listings</span>
   <span><b>{{ active_count }}</b> active</span>
@@ -133,6 +158,13 @@
     </div>
 
     <div class="chart" id="chart-{{ c.id }}"></div>
+
+    {% if session.logged_in %}
+    <form method="post" action="{{ url_for('hide_listing', listing_id=c.id) }}" style="text-align:right;">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <button class="btn btn-outline btn-sm" type="submit" title="Auf der Startseite ausblenden (wird weiter getrackt)">🙈 Ausblenden</button>
+    </form>
+    {% endif %}
   </div>
   {% endfor %}
 </div>

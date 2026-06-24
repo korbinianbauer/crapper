@@ -203,14 +203,39 @@ def index():
         t['listing_count'] = counts.get(t['id'], 0)
         t['source_name'] = source_names.get(t['source'], t['source'])
 
+    hidden = [{
+        'id': l['id'],
+        'source_name': source_names.get(l['source'], l['source']),
+        'title': l['title'] or '(untitled)',
+        'url': l['url'],
+        'location': l['location'],
+    } for l in db.get_hidden_listings()]
+
     return render_template(
         'index.html',
         trackers=trackers,
         cards=cards,
+        hidden_listings=hidden,
         active_count=sum(1 for c in cards if c['active']),
         gone_count=sum(1 for c in cards if not c['active']),
         refreshing=list(_active_refreshes),
     )
+
+
+@app.route('/listing/<int:listing_id>/hide', methods=['POST'])
+@login_required
+@csrf_protect
+def hide_listing(listing_id):
+    db.set_listing_hidden(listing_id, True)
+    return redirect(url_for('index'))
+
+
+@app.route('/listing/<int:listing_id>/unhide', methods=['POST'])
+@login_required
+@csrf_protect
+def unhide_listing(listing_id):
+    db.set_listing_hidden(listing_id, False)
+    return redirect(url_for('index'))
 
 
 # ── add / manage trackers ───────────────────────────────────────────────────────
