@@ -114,8 +114,15 @@ schema (no `trackers.source` column). No backward compatibility is maintained.
 - Location ids: `GET /s-ort-empfehlungen.json?query=...` (Miesbach → `10929`).
 - Search URL: `/s-{keyword}/k0l{locId}r{radius}`, paged via `/s-seite:{n}/...`.
 - Listing fields: `#viewad-title`, `#viewad-price`, `#viewad-locality`,
-  `og:image`. Removed ad 404s or lacks `#viewad-title`. Search cards:
-  `article.aditem` with `data-adid` / `data-href`. Plain headers suffice.
+  `og:image`. Removed ad 404s or lacks `#viewad-title`. Search cards are matched
+  by `article[data-adid]` (covers old `article.aditem` and the newer card layout).
+  Parse with **lxml** — the stdlib `html.parser` silently drops most cards on some
+  category pages. Plain headers suffice.
+- **Result count is inflated**: the `… von N …` heading counts duplicates (mainly
+  repeated promoted/Top ads across pages). The real distinct set is smaller and
+  KA serves a deterministic subset to scrapers (deep pages clamp to duplicates,
+  unaffected by order/delay/session). So `fetch_search` returning fewer than the
+  preview count is **expected, not a bug** — do not try to "close the gap".
 
 ### ImmoScout24
 - Locations: `GET https://www.immobilienscout24.de/geoautocomplete/v3/locations.json?i=…`
