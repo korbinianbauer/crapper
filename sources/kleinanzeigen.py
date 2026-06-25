@@ -27,8 +27,13 @@ _HEADERS = {
                'image/avif,image/webp,*/*;q=0.8'),
 }
 _TIMEOUT = 20
+# lxml is far more tolerant of the broken markup KA emits on some category result
+# pages (the stdlib html.parser silently drops most <article> nodes there).
+_PARSER = 'lxml'
 _AD_ID_RE = re.compile(r'/(\d{6,})-\d+-\d+\b')
-_COUNT_RE = re.compile(r'von\s+([\d.]+)\s+Ergebnis')
+# Result count from the "<from> - <to> von <total> …" heading (works across
+# verticals: "… von 233 Ergebnissen", "… von 94 Immobilien", …).
+_COUNT_RE = re.compile(r'\d+\s*[-–]\s*\d+\s+von\s+([\d.]+)')
 _REMOVED_MARKERS = (
     'Die gewünschte Anzeige ist nicht mehr verfügbar',
     'Anzeige nicht gefunden',
@@ -93,7 +98,7 @@ class KleinanzeigenSource(Source):
         html = resp.text
         if any(m in html for m in _REMOVED_MARKERS):
             return None
-        soup = BeautifulSoup(html, 'html.parser')
+        soup = BeautifulSoup(html, _PARSER)
         title_el = soup.select_one('#viewad-title')
         if title_el is None:
             return None
@@ -119,13 +124,17 @@ class KleinanzeigenSource(Source):
         return re.sub(r'/s-', f'/s-seite:{page}/', url, count=1)
 
     def _label_from_html(self, html: str) -> str:
-        soup = BeautifulSoup(html, 'html.parser')
+        soup = BeautifulSoup(html, _PARSER)
         h1 = soup.select_one('h1')
         if not h1:
             return ''
         text = ' '.join(h1.get_text(' ', strip=True).split())
         m = re.search(r'Ergebnis(?:se|sen)?\s+für\s+(.*)$', text)
         return m.group(1).strip() if m else text
+
+    def _parse_total(self, html: str) -> int | None:
+        m = _COUNT_RE.search(html)
+        return int(m.group(1).replace('.', '')) if m else None
 
     def describe_search(self, url: str) -> tuple[int | None, str]:
         try:
@@ -134,43 +143,52 @@ class KleinanzeigenSource(Source):
         except Exception as e:
             logger.error('KA describe_search failed: %s', e)
             return None, ''
-        m = _COUNT_RE.search(resp.text)
-        count = int(m.group(1).replace('.', '')) if m else None
-        return count, self._label_from_html(resp.text)
+        return self._parse_total(resp.text), self._label_from_html(resp.text)
 
     def _parse_page(self, html: str) -> list[ScrapedListing]:
-        soup = BeautifulSoup(html, 'html.parser')
+        # Match by data-adid (not a CSS class) so this survives KA's old
+        # `article.aditem` cards and the newer Tailwind-styled result cards alike.
+        soup = BeautifulSoup(html, _PARSER)
         out: list[ScrapedListing] = []
-        for art in soup.select('article.aditem'):
+        for art in soup.select('article[data-adid]'):
             ad_id = art.get('data-adid')
-            href = art.get('data-href') or ''
             link = art.select_one('a[href*="/s-anzeige/"]')
-            if not href and link:
-                href = link.get('href', '')
+            href = art.get('data-href') or (link.get('href', '') if link else '')
             if not ad_id and href:
                 ad_id = self._extract_ad_id(href)
             if not ad_id or not href:
                 continue
-            title_el = art.select_one('.text-module-begin a, h2 a, .ellipsis')
+
+            title_el = art.select_one('.text-module-begin a, h2 a, .ellipsis') or link
+            loc_el = art.select_one('.aditem-main--top--left')
+
+            # Price: dedicated element if present, else the first € amount found
+            # in the card text (kept to just that snippet, not the whole card).
             price_el = art.select_one(
                 '.aditem-main--middle--price-shipping--price, .aditem-main--middle--price')
-            loc_el = art.select_one('.aditem-main--top--left')
-            img_el = art.select_one('.aditem-image img, .imagebox img')
+            if price_el:
+                price, price_text = _parse_price(price_el.get_text(strip=True))
+            else:
+                m = re.search(r'\d[\d.]*(?:,\d+)?\s*€(?:\s*VB)?', art.get_text(' ', strip=True))
+                price, price_text = _parse_price(m.group(0)) if m else (None, None)
+
+            img_el = art.select_one('img')
             image_url = None
             if img_el:
                 image_url = img_el.get('src') or img_el.get('data-imgsrc') or img_el.get('srcset')
-            location = ' '.join(loc_el.get_text(' ', strip=True).split()) if loc_el else None
-            price, price_text = _parse_price(price_el.get_text(strip=True) if price_el else None)
+
             out.append(ScrapedListing(
                 ad_id=str(ad_id), url=urljoin(_BASE, href),
                 title=title_el.get_text(strip=True) if title_el else None,
-                location=location, image_url=image_url,
+                location=' '.join(loc_el.get_text(' ', strip=True).split()) if loc_el else None,
+                image_url=image_url,
                 price=price, price_text=price_text,
             ))
         return out
 
     def fetch_search(self, url: str, max_pages: int = 5) -> list[ScrapedListing]:
         seen: dict[str, ScrapedListing] = {}
+        total: int | None = None
         for page in range(1, max_pages + 1):
             try:
                 resp = self._get(self._page_url(url, page))
@@ -178,15 +196,23 @@ class KleinanzeigenSource(Source):
             except Exception as e:
                 logger.error('KA search failed (p%d): %s', page, e)
                 break
+            if total is None:
+                total = self._parse_total(resp.text)
             page_results = self._parse_page(resp.text)
             if not page_results:
                 break
             new = sum(1 for r in page_results if r.ad_id not in seen)
             for r in page_results:
                 seen.setdefault(r.ad_id, r)
-            logger.info('KA search p%d: %d ads (%d new)', page, len(page_results), new)
-            if new == 0:
+            logger.info('KA search p%d: %d ads (%d new, %d/%s total)',
+                        page, len(page_results), new, len(seen), total)
+            # Stop when we've covered the reported total. Don't stop on new==0:
+            # KA throttling can return a duplicate page transiently, so keep
+            # going (a slower cadence avoids that) until the total is reached.
+            if total is not None and len(seen) >= total:
                 break
+            if total is None and new == 0:
+                break          # unknown total → fall back to "no new ads" stop
             if page < max_pages:
-                time.sleep(1.0)
+                time.sleep(1.5)
         return list(seen.values())
