@@ -163,20 +163,59 @@ def _refresh_async(tracker_id: int):
 
 # ── index ───────────────────────────────────────────────────────────────────────
 
+def _avg_price_trend(histories: list[list[dict]]) -> list[dict]:
+    """Average normalised price trend across several listings.
+
+    Each listing's numeric prices are normalised to its first observation
+    (index 1.0 = 100 %), then forward-filled and averaged across all listings
+    that have started, at every distinct observation timestamp. Returns a list
+    of `{'t': iso, 'index': float}` (1.0 == baseline)."""
+    series: list[list[tuple[str, float]]] = []
+    for hist in histories:
+        pts = [(h['t'], h['price']) for h in hist if h['price'] is not None]
+        if not pts:
+            continue
+        base = pts[0][1]
+        if not base:
+            continue
+        series.append([(t, p / base) for t, p in pts])
+    if not series:
+        return []
+
+    times = sorted({t for s in series for t, _ in s})
+    out: list[dict] = []
+    for t in times:
+        vals = []
+        for s in series:
+            cur = None
+            for st, sv in s:
+                if st <= t:
+                    cur = sv
+                else:
+                    break
+            if cur is not None:        # only count listings that have started
+                vals.append(cur)
+        if vals:
+            out.append({'t': t, 'index': sum(vals) / len(vals)})
+    return out
+
+
 @app.route('/')
 def index():
     trackers = db.get_trackers()
     listings = db.get_all_listings()
     history = db.get_price_history_map()
+    memberships = db.get_tracker_memberships()
 
     source_names = {s.name: s.display_name for s in sources.all_sources()}
 
-    cards = []
+    cards: dict[int, dict] = {}
     for l in listings:
         hist = history.get(l['id'], [])
         latest = next((h for h in reversed(hist) if h['price_text']), None)
+        latest_num = next((h for h in reversed(hist) if h['price'] is not None), None)
         types = (l['tracker_types'] or '').split(',')
-        cards.append({
+        cards[l['id']] = {
             'id': l['id'],
             'source': l['source'],
             'source_name': source_names.get(l['source'], l['source']),
@@ -192,16 +231,38 @@ def index():
             'first_seen': l['first_seen'],
             'last_seen': l['last_seen'],
             'current_price': latest['price_text'] if latest else '—',
+            'current_price_num': latest_num['price'] if latest_num else None,
             'history': [
                 {'t': h['observed_at'], 'price': h['price'], 'label': h['price_text']}
                 for h in hist
             ],
-        })
+        }
 
     counts = db.get_tracker_listing_counts()
+    tracker_cards = []
     for t in trackers:
         t['listing_count'] = counts.get(t['id'], 0)
         t['source_name'] = source_names.get(t['source'], t['source'])
+
+        ids = [lid for lid in memberships.get(t['id'], []) if lid in cards]
+        tcards = [cards[i] for i in ids]
+        prices = [c['current_price_num'] for c in tcards if c['current_price_num'] is not None]
+        active = sum(1 for c in tcards if c['active'])
+        tracker_cards.append({
+            'id': t['id'],
+            'source_name': t['source_name'],
+            'label': t['label'],
+            'type': t['type'],
+            'url': t['url'],
+            'listing_ids': ids,
+            'listing_count': len(tcards),
+            'active_count': active,
+            'gone_count': len(tcards) - active,
+            'avg_price': sum(prices) / len(prices) if prices else None,
+            'min_price': min(prices) if prices else None,
+            'max_price': max(prices) if prices else None,
+            'trend': _avg_price_trend([cards[i]['history'] for i in ids]),
+        })
 
     hidden = [{
         'id': l['id'],
@@ -214,10 +275,12 @@ def index():
     return render_template(
         'index.html',
         trackers=trackers,
+        tracker_cards=tracker_cards,
         cards=cards,
         hidden_listings=hidden,
-        active_count=sum(1 for c in cards if c['active']),
-        gone_count=sum(1 for c in cards if not c['active']),
+        listing_count=len(cards),
+        active_count=sum(1 for c in cards.values() if c['active']),
+        gone_count=sum(1 for c in cards.values() if not c['active']),
         refreshing=list(_active_refreshes),
     )
 

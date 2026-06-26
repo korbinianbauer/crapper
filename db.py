@@ -310,6 +310,18 @@ def get_tracker_listing_counts() -> dict[int, int]:
             'SELECT tracker_id, COUNT(*) FROM tracker_listings GROUP BY tracker_id')}
 
 
+def get_tracker_memberships() -> dict[int, list[int]]:
+    """tracker_id → list of its listing_ids (which trackers surfaced which listing)."""
+    with get_db() as conn:
+        rows = conn.execute(
+            'SELECT tracker_id, listing_id FROM tracker_listings ORDER BY tracker_id, listing_id'
+        ).fetchall()
+    out: dict[int, list[int]] = {}
+    for r in rows:
+        out.setdefault(r[0], []).append(r[1])
+    return out
+
+
 _LISTING_SELECT = '''
     SELECT l.*,
            (SELECT GROUP_CONCAT(t.label, ' · ')
