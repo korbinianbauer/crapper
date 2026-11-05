@@ -10,3 +10,4 @@ dist/
 build/
 *.log
 poll.pid
+archive/

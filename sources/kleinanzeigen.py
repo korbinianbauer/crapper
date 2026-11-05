@@ -6,6 +6,7 @@ URL-driven. Plain browser-like HTTP is enough; no JS rendering needed.
                 pagination injects "seite:N" right after "/s-".
 - Listing fields: #viewad-title / #viewad-price / #viewad-locality / og:image.
 """
+import json
 import logging
 import re
 import time
@@ -41,6 +42,21 @@ _REMOVED_MARKERS = (
 )
 
 
+def _best_img_url(img) -> str | None:
+    """First real http(s) image URL of an <img>: lazy-loaded cards carry a
+    placeholder (data: URI / empty) in src and the real one in data-* / srcset."""
+    if img is None:
+        return None
+    cands = [img.get('src'), img.get('data-imgsrc'), img.get('data-src')]
+    srcset = img.get('srcset') or img.get('data-srcset')
+    if srcset:
+        cands.append(srcset.split(',')[0].strip().split(' ')[0])
+    for c in cands:
+        if c and c.strip().startswith(('http://', 'https://')):
+            return c.strip()
+    return None
+
+
 def _parse_price(text: str | None) -> tuple[float | None, str | None]:
     if not text:
         return None, None
@@ -61,6 +77,7 @@ def _parse_price(text: str | None) -> tuple[float | None, str | None]:
 class KleinanzeigenSource(Source):
     name = 'kleinanzeigen'
     display_name = 'Kleinanzeigen'
+    archive_details = True
 
     def _get(self, url: str) -> requests.Response:
         return requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
@@ -105,16 +122,38 @@ class KleinanzeigenSource(Source):
         price_el = soup.select_one('#viewad-price') or soup.select_one('h2.boxedarticle--price')
         loc_el = soup.select_one('#viewad-locality')
         img_el = soup.select_one('meta[property="og:image"]')
+        desc_el = soup.select_one('#viewad-description-text')
+        details_el = soup.select_one('#viewad-details')
+        images: list[str] = []
+        for u in ([img_el['content']] if img_el and img_el.get('content') else []) + [
+                _best_img_url(i) for i in soup.select('#viewad-product img, .galleryimage-element img')]:
+            if u and u not in images:
+                images.append(u)
         price, price_text = _parse_price(price_el.get_text(strip=True) if price_el else None)
         return ScrapedListing(
             ad_id=str(ad_id),
             url=resp.url,
             title=title_el.get_text(strip=True),
             location=loc_el.get_text(' ', strip=True) if loc_el else None,
-            image_url=img_el['content'] if img_el and img_el.get('content') else None,
+            image_url=images[0] if images else None,
             price=price,
             price_text=price_text,
+            description=self._full_text(desc_el, details_el),
+            images=images,
+            raw_html=html,
         )
+
+    @staticmethod
+    def _full_text(desc_el, details_el) -> str | None:
+        parts = []
+        if desc_el:
+            parts.append(desc_el.get_text('\n', strip=True))
+        if details_el:
+            rows = [' '.join(li.get_text(' ', strip=True).split())
+                    for li in details_el.select('li')]
+            if rows:
+                parts.append('Details:\n' + '\n'.join(rows))
+        return '\n\n'.join(parts) or None
 
     # ── search ───────────────────────────────────────────────────────────────
     def _page_url(self, url: str, page: int) -> str:
@@ -159,7 +198,23 @@ class KleinanzeigenSource(Source):
             if not ad_id or not href:
                 continue
 
-            title_el = art.select_one('.text-module-begin a, h2 a, .ellipsis') or link
+            # Newer card layout: the link only wraps the image (its text is the photo
+            # count, e.g. "30"); title and image URL live in an embedded ld+json
+            # ImageObject. Prefer that, then the classic title elements.
+            title, ld_img = '', None
+            for sc in art.select('script[type="application/ld+json"]'):
+                try:
+                    ld = json.loads(sc.string or '')
+                except ValueError:
+                    continue
+                if isinstance(ld, dict):
+                    title = title or (ld.get('title') or '').strip()
+                    ld_img = ld_img or ld.get('contentUrl')
+            if not title:
+                el = art.select_one('.text-module-begin a, h2 a, .ellipsis') or link
+                title = el.get_text(strip=True) if el else ''
+                if title.isdigit():
+                    title = ''
             loc_el = art.select_one('.aditem-main--top--left')
 
             # Price: dedicated element if present, else the first € amount found
@@ -172,14 +227,11 @@ class KleinanzeigenSource(Source):
                 m = re.search(r'\d[\d.]*(?:,\d+)?\s*€(?:\s*VB)?', art.get_text(' ', strip=True))
                 price, price_text = _parse_price(m.group(0)) if m else (None, None)
 
-            img_el = art.select_one('img')
-            image_url = None
-            if img_el:
-                image_url = img_el.get('src') or img_el.get('data-imgsrc') or img_el.get('srcset')
+            image_url = next((u for u in map(_best_img_url, art.select('img')) if u), None) or ld_img
 
             out.append(ScrapedListing(
                 ad_id=str(ad_id), url=urljoin(_BASE, href),
-                title=title_el.get_text(strip=True) if title_el else None,
+                title=title or None,
                 location=' '.join(loc_el.get_text(' ', strip=True).split()) if loc_el else None,
                 image_url=image_url,
                 price=price, price_text=price_text,

@@ -9,9 +9,10 @@ import time
 from collections import defaultdict
 from functools import wraps
 
-from flask import (Flask, abort, flash, jsonify, redirect, render_template,
-                   request, session, url_for)
+from flask import (Flask, Response, abort, flash, jsonify, redirect, render_template,
+                   request, send_from_directory, session, url_for)
 
+import archive
 import db
 import sources
 from poller import poll_tracker
@@ -227,6 +228,7 @@ def index():
             'title': l['title'] or '(untitled)',
             'location': l['location'],
             'image_url': l['image_url'],
+            'image_file': l['image_file'],
             'active': bool(l['active']),
             'first_seen': l['first_seen'],
             'last_seen': l['last_seen'],
@@ -283,6 +285,29 @@ def index():
         gone_count=sum(1 for c in cards.values() if not c['active']),
         refreshing=list(_active_refreshes),
     )
+
+
+@app.route('/archive/img/<path:name>')
+def archive_image(name):
+    return send_from_directory(archive.IMG_DIR, name, max_age=86400 * 30)
+
+
+@app.route('/listing/<int:listing_id>/versions')
+@login_required
+def listing_versions(listing_id):
+    return jsonify(db.get_versions(listing_id))
+
+
+@app.route('/listing/<int:listing_id>/version/<int:version>/html')
+@login_required
+def listing_version_html(listing_id, version):
+    html = db.get_version_html(listing_id, version)
+    if html is None:
+        abort(404)
+    # Archived third-party page: serve as inert text/plain-sandboxed document.
+    return Response(html, mimetype='text/html',
+                    headers={'Content-Security-Policy': 'sandbox; script-src \'none\'',
+                             'X-Content-Type-Options': 'nosniff'})
 
 
 @app.route('/listing/<int:listing_id>/hide', methods=['POST'])

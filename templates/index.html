@@ -306,8 +306,9 @@ function esc(s) {
 }
 
 function listingCardHtml(c) {
-  const thumb = c.image_url
-    ? `<img class="thumb" src="${esc(c.image_url)}" loading="lazy" alt="">`
+  const imgSrc = c.image_file ? '/archive/img/' + c.image_file : c.image_url;
+  const thumb = imgSrc
+    ? `<img class="thumb" src="${esc(imgSrc)}" loading="lazy" alt="">`
     : '<div class="thumb"></div>';
   const badge = c.active
     ? '<span class="badge badge-green">aktiv</span>'
@@ -333,6 +334,8 @@ function listingCardHtml(c) {
     </div>
     <div class="row"><span class="price">${esc(c.current_price)}</span> ${badge}</div>
     <div class="chart" id="chart-${c.id}"></div>
+    ${LOGGED_IN ? `<div style="text-align:right;"><button class="btn btn-outline btn-sm" type="button"
+        onclick="toggleVersions(${c.id}, this)">🗂 Versionen</button></div><div class="versions" id="ver-${c.id}"></div>` : ''}
     ${hide}
   </div>`;
 }
@@ -354,6 +357,20 @@ function openTracker(id) {
   detail.style.display = 'block';
   cards.forEach(renderListingChart);
   window.scrollTo(0, 0);
+}
+
+async function toggleVersions(id, btn) {
+  const box = document.getElementById('ver-' + id);
+  if (box.innerHTML) { box.innerHTML = ''; return; }
+  const vs = await (await fetch('/listing/' + id + '/versions')).json();
+  box.innerHTML = vs.map(v => `
+    <div class="meta" style="border-top:1px solid var(--border,#334155);padding:.4rem 0;">
+      <b>v${v.version}</b> · ${esc(v.fetched_at.slice(0, 16).replace('T', ' '))}<br>
+      ${esc(v.title)} · ${esc(v.location) || '—'}
+      ${v.description ? `<details><summary>Beschreibung</summary><div style="white-space:pre-wrap">${esc(v.description)}</div></details>` : ''}
+      ${v.image_file ? `<a href="/archive/img/${esc(v.image_file)}" target="_blank">Bild</a>` : ''}
+      ${v.has_html ? ` <a href="/listing/${id}/version/${v.version}/html" target="_blank">Original-HTML</a>` : ''}
+    </div>`).join('') || '<div class="meta">Keine Versionen.</div>';
 }
 
 function closeTracker() {

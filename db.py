@@ -1,7 +1,10 @@
 """All SQLite access for crapper. `init_db()` creates the schema and wipes the
 data tables if it detects an older (pre-multi-source) schema."""
+import hashlib
+import json
 import os
 import sqlite3
+import zlib
 from contextlib import contextmanager
 
 DB_PATH = os.path.join(os.path.dirname(__file__), 'crapper.db')
@@ -85,6 +88,26 @@ def init_db():
                 price_text  TEXT
             );
 
+            -- Append-only archive of the ad's content. A new row is written only
+            -- when title/location/description/image changes (versioned per listing).
+            -- raw_html is the original page, zlib-compressed (single-ad fetches only).
+            CREATE TABLE IF NOT EXISTS listing_versions (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                listing_id   INTEGER NOT NULL
+                                 REFERENCES listings(id) ON DELETE CASCADE,
+                version      INTEGER NOT NULL,
+                fetched_at   TEXT NOT NULL,
+                title        TEXT,
+                location     TEXT,
+                description  TEXT,
+                image_url    TEXT,
+                image_file   TEXT,
+                images       TEXT,          -- JSON list of all image URLs
+                content_hash TEXT NOT NULL,
+                raw_html     BLOB,
+                UNIQUE(listing_id, version)
+            );
+
             CREATE TABLE IF NOT EXISTS settings (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL DEFAULT ''
@@ -96,7 +119,16 @@ def init_db():
         ''')
         _add_columns_if_missing(conn, 'listings', {
             'hidden': 'INTEGER NOT NULL DEFAULT 0',   # hidden from the frontpage by the user
+            'detail_at': 'TEXT',                      # last full-page archive (ISO UTC)
+            'image_file': 'TEXT',                     # locally archived copy of image_url
         })
+        # Seed v1 for listings that predate versioning.
+        conn.execute('''
+            INSERT INTO listing_versions (listing_id, version, fetched_at, title, location,
+                                          image_url, images, content_hash)
+            SELECT id, 1, last_seen, title, location, image_url, '[]', 'legacy'
+              FROM listings l
+             WHERE NOT EXISTS (SELECT 1 FROM listing_versions v WHERE v.listing_id = l.id)''')
         _init_default_settings(conn)
 
 
@@ -233,11 +265,25 @@ def delete_tracker(tracker_id: int):
 
 # ── listings ──────────────────────────────────────────────────────────────────
 
+def _clean(v: str | None) -> str | None:
+    v = (v or '').strip()
+    return v or None
+
+
+def _clean_img(v: str | None) -> str | None:
+    v = _clean(v)
+    return v if v and v.startswith(('http://', 'https://')) else None
+
+
 def upsert_listing(source: str, ad_id: str, url: str, title: str | None,
-                   location: str | None, image_url: str | None, seen_at: str) -> int:
+                   location: str | None, image_url: str | None, seen_at: str,
+                   description: str | None = None, images: list[str] | None = None,
+                   raw_html: str | None = None) -> int:
     """Insert or refresh the listing for an ad (unique by source + ad_id). Bumps
-    last_seen and marks it active. Returns the listing id. Tracker membership is
-    recorded separately via link_listing()."""
+    last_seen and marks it active. Empty/placeholder values never overwrite good
+    stored ones. Records a new archive version if the content changed. Returns the
+    listing id. Tracker membership is recorded separately via link_listing()."""
+    title, location, image_url = _clean(title), _clean(location), _clean_img(image_url)
     with get_db() as conn:
         row = conn.execute(
             'SELECT id FROM listings WHERE source = ? AND ad_id = ?', (source, ad_id)
@@ -250,18 +296,93 @@ def upsert_listing(source: str, ad_id: str, url: str, title: str | None,
                        title = COALESCE(?, title),
                        location = COALESCE(?, location),
                        image_url = COALESCE(?, image_url),
+                       image_file = CASE WHEN ? IS NOT NULL AND ? IS NOT image_url
+                                         THEN NULL ELSE image_file END,
                        url = ?
                    WHERE id = ?''',
-                (seen_at, title, location, image_url, url, lid),
+                (seen_at, title, location, image_url, image_url, image_url, url, lid),
             )
-            return lid
-        cur = conn.execute(
-            '''INSERT INTO listings
-               (source, ad_id, url, title, location, image_url, first_seen, last_seen, active)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)''',
-            (source, ad_id, url, title, location, image_url, seen_at, seen_at),
-        )
-        return cur.lastrowid
+        else:
+            lid = conn.execute(
+                '''INSERT INTO listings
+                   (source, ad_id, url, title, location, image_url, first_seen, last_seen, active)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)''',
+                (source, ad_id, url, title, location, image_url, seen_at, seen_at),
+            ).lastrowid
+        _record_version(conn, lid, seen_at, title, location, _clean(description),
+                        image_url, images, raw_html)
+        return lid
+
+
+def _record_version(conn, lid, seen_at, title, location, description, image_url,
+                    images, raw_html):
+    """Append a version when the content differs from the latest one. Fields the
+    scrape did not provide (e.g. description from a search card) are carried over
+    from the previous version so partial scrapes don't create phantom changes."""
+    last = conn.execute(
+        'SELECT * FROM listing_versions WHERE listing_id = ? ORDER BY version DESC LIMIT 1',
+        (lid,)).fetchone()
+    if last:
+        title = title or last['title']
+        location = location or last['location']
+        description = description or last['description']
+        image_url = image_url or last['image_url']
+    images = [u for u in (images or []) if _clean_img(u)]
+    h = hashlib.sha256(json.dumps(
+        [title, location, description, image_url], ensure_ascii=False).encode()).hexdigest()
+    last_hash = last['content_hash'] if last else None
+    if last_hash == 'legacy':      # seeded pre-versioning row: hash its fields now
+        last_hash = hashlib.sha256(json.dumps(
+            [last['title'], last['location'], last['description'], last['image_url']],
+            ensure_ascii=False).encode()).hexdigest()
+    if last and last_hash == h:
+        # Same content; still keep a first original page if we only had a card before.
+        if raw_html and not last['raw_html']:
+            conn.execute('UPDATE listing_versions SET raw_html = ?, images = ? WHERE id = ?',
+                         (zlib.compress(raw_html.encode()), json.dumps(images), last['id']))
+        return
+    conn.execute(
+        '''INSERT INTO listing_versions
+           (listing_id, version, fetched_at, title, location, description, image_url,
+            image_file, images, content_hash, raw_html)
+           VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)''',
+        (lid, (last['version'] + 1) if last else 1, seen_at, title, location, description,
+         image_url, json.dumps(images), h,
+         zlib.compress(raw_html.encode()) if raw_html else None))
+
+
+def listing_needs_image(listing_id: int) -> str | None:
+    """image_url of the listing if it has no archived local copy yet, else None."""
+    with get_db() as conn:
+        r = conn.execute('SELECT image_url, image_file FROM listings WHERE id = ?',
+                         (listing_id,)).fetchone()
+    return r['image_url'] if r and r['image_url'] and not r['image_file'] else None
+
+
+def set_image_file(listing_id: int, image_url: str, image_file: str):
+    with get_db() as conn:
+        conn.execute('UPDATE listings SET image_file = ? WHERE id = ? AND image_url = ?',
+                     (image_file, listing_id, image_url))
+        conn.execute(
+            '''UPDATE listing_versions SET image_file = ?
+               WHERE image_url = ? AND listing_id = ? AND image_file IS NULL''',
+            (image_file, image_url, listing_id))
+
+
+def get_versions(listing_id: int) -> list[dict]:
+    with get_db() as conn:
+        return [dict(r) for r in conn.execute(
+            '''SELECT version, fetched_at, title, location, description, image_url,
+                      image_file, raw_html IS NOT NULL AS has_html
+               FROM listing_versions WHERE listing_id = ? ORDER BY version DESC''',
+            (listing_id,))]
+
+
+def get_version_html(listing_id: int, version: int) -> str | None:
+    with get_db() as conn:
+        r = conn.execute('SELECT raw_html FROM listing_versions WHERE listing_id = ? '
+                         'AND version = ?', (listing_id, version)).fetchone()
+    return zlib.decompress(r[0]).decode() if r and r[0] else None
 
 
 def link_listing(tracker_id: int, listing_id: int, seen_at: str):
@@ -397,3 +518,15 @@ def get_price_history_map() -> dict[int, list[dict]]:
             {'observed_at': r[1], 'price': r[2], 'price_text': r[3]}
         )
     return out
+
+
+def needs_detail(listing_id: int, older_than: str) -> bool:
+    """True if the full ad page was never archived or not since *older_than*."""
+    with get_db() as conn:
+        r = conn.execute('SELECT detail_at FROM listings WHERE id = ?', (listing_id,)).fetchone()
+    return bool(r) and (not r[0] or r[0] < older_than)
+
+
+def mark_detail(listing_id: int, at: str):
+    with get_db() as conn:
+        conn.execute('UPDATE listings SET detail_at = ? WHERE id = ?', (at, listing_id))

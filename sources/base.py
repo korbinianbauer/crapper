@@ -5,7 +5,7 @@ it is a single listing or a search and extracts all parameters from the URL
 itself. No site-specific input fields are needed.
 """
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -18,6 +18,10 @@ class ScrapedListing:
     image_url: str | None = None
     price: float | None = None          # numeric currency value, None when not numeric
     price_text: str | None = None       # raw label, e.g. "85.000 €", "VB", "560 € Kaltmiete"
+    # Archive material — only filled when the source has it (full ad pages):
+    description: str | None = None
+    images: list[str] = field(default_factory=list)   # all image URLs of the ad
+    raw_html: str | None = None                       # original page, archived verbatim
 
 
 @dataclass
@@ -35,6 +39,7 @@ class Source(ABC):
     and implement URL recognition + fetching, then register in __init__.py."""
 
     name: str                  # stable slug + DB key, e.g. 'kleinanzeigen'
+    archive_details = False    # True → search hits get their full ad page fetched + archived daily
     display_name: str          # shown in the UI, e.g. 'Kleinanzeigen'
 
     @abstractmethod

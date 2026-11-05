@@ -103,6 +103,12 @@ count, summary}` (or an error) — the frontend calls it live as the user pastes
   memberships and orphan listings (no remaining membership) are removed.
 - **`price_history`** — append-only price observations per listing; `price` is
   NULL for non-numeric prices (VB / "Zu verschenken"), raw label in `price_text`.
+- **`listing_versions`** — append-only archive of the ad content (title, location,
+  description, image, zlib'd original HTML for single-ad fetches). A new version is
+  written only when content changes; fields a scrape lacks are carried over from the
+  previous version. Empty titles / placeholder images never overwrite stored values
+  (`db.upsert_listing`). Images are downloaded to `archive/images/` (`archive.py`)
+  and served via `/archive/img/<file>`; the UI falls back to the remote URL.
 - **`settings`** — `poll_cron` (default `0 4 * * *`), `search_pages`.
 
 `init_db()` drops & recreates the data tables if it detects a pre-multi-source
@@ -123,6 +129,12 @@ schema (no `trackers.source` column). No backward compatibility is maintained.
   not just scrapers (KA over-counts, mainly via repeated promoted/Top ads). So
   `fetch_search` returning fewer than the preview count is **expected, not a bug**
   — the gap is non-existent ads; do not try to "close" it.
+
+- Search cards (newer layout): the `<a>` only wraps the image (text = photo count);
+  title + image URL come from the embedded `ld+json` ImageObject.
+- Search hits get their full ad page fetched + archived at most every 20 h
+  (`Source.archive_details`, `poller._archive_full`): all images, description,
+  details, original HTML → `listing_versions` + `archive/images/`.
 
 ### ImmoScout24
 - Locations: `GET https://www.immobilienscout24.de/geoautocomplete/v3/locations.json?i=…`

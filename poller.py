@@ -1,8 +1,10 @@
 """Poll logic: refresh every tracker via its source, archive prices, flag
 disappeared listings."""
 import logging
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 
+import archive
 import db
 import sources
 
@@ -11,6 +13,41 @@ logger = logging.getLogger(__name__)
 
 def _now() -> str:
     return datetime.utcnow().isoformat()
+
+
+def _upsert(source, r, seen_at) -> int:
+    lid = db.upsert_listing(
+        source.name, r.ad_id, r.url, r.title, r.location, r.image_url, seen_at,
+        description=r.description, images=r.images, raw_html=r.raw_html)
+    url = db.listing_needs_image(lid)
+    if url and (fname := archive.download_image(url)):
+        db.set_image_file(lid, url, fname)
+    return lid
+
+
+DETAIL_INTERVAL = timedelta(hours=20)    # "at least daily" with slack for poll jitter
+DETAIL_DELAY = 1.0                       # seconds between ad-page requests
+
+
+def _archive_full(source, lid: int, url: str, seen_at: str):
+    """Fetch the whole ad page and archive it (all images, description, details,
+    original HTML). A failed/removed fetch changes nothing — activity is decided
+    by the search, not by this."""
+    cutoff = (datetime.utcnow() - DETAIL_INTERVAL).isoformat()
+    if not db.needs_detail(lid, cutoff):
+        return
+    time.sleep(DETAIL_DELAY)
+    try:
+        full = source.fetch_listing(url)
+    except Exception as e:
+        logger.warning('Detail fetch failed %s: %s', url, e)
+        return
+    if full is None:
+        return
+    lid = _upsert(source, full, seen_at)
+    for img in full.images:
+        archive.download_image(img)
+    db.mark_detail(lid, seen_at)
 
 
 def poll_tracker(tracker: dict):
@@ -41,10 +78,10 @@ def _poll_listing_tracker(tracker: dict, source):
                     tracker['id'], source.name)
         return
 
-    lid = db.upsert_listing(
-        source.name, scraped.ad_id, scraped.url, scraped.title,
-        scraped.location, scraped.image_url, seen_at,
-    )
+    lid = _upsert(source, scraped, seen_at)
+    for img in scraped.images:
+        archive.download_image(img)
+    db.mark_detail(lid, seen_at)
     db.link_listing(tracker['id'], lid, seen_at)
     db.add_price(lid, seen_at, scraped.price, scraped.price_text)
     logger.info('Listing tracker %d (%s): %s — %s',
@@ -60,11 +97,11 @@ def _poll_search_tracker(tracker: dict, source):
 
     results = source.fetch_search(tracker['url'], max_pages=max_pages)
     for r in results:
-        lid = db.upsert_listing(
-            source.name, r.ad_id, r.url, r.title, r.location, r.image_url, seen_at,
-        )
+        lid = _upsert(source, r, seen_at)
         db.link_listing(tracker['id'], lid, seen_at)
         db.add_price(lid, seen_at, r.price, r.price_text)
+        if source.archive_details:
+            _archive_full(source, lid, r.url, seen_at)
 
     # Anything not refreshed this run has dropped out of the search → inactive.
     db.deactivate_missing(tracker['id'], seen_at)
