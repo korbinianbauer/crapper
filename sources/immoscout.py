@@ -10,6 +10,7 @@ mobile-API search:
 Single listings: GET <api>/expose/<id> returns a JSON expose (title in the TITLE
 section, price in TOP_ATTRIBUTES, address in MAP, images in MEDIA).
 """
+import json
 import logging
 import re
 import time
@@ -64,6 +65,7 @@ def _prettify(segment: str) -> str:
 class ImmoScoutSource(Source):
     name = 'immoscout'
     display_name = 'ImmoScout24'
+    archive_details = True
 
     # ── URL recognition ──────────────────────────────────────────────────────
     def matches_url(self, url: str) -> bool:
@@ -184,6 +186,25 @@ class ImmoScoutSource(Source):
                 image_url = pic
                 break
 
+        # Archive material: every attribute table + text block as plain text, all
+        # pictures in full resolution, and the raw expose JSON.
+        parts = []
+        for sec in data.get('sections', []):
+            if sec.get('type') == 'TEXT_AREA' and sec.get('text'):
+                parts.append(f"{sec.get('title') or ''}\n{sec['text'].strip()}".strip())
+            elif sec.get('type') == 'ATTRIBUTE_LIST':
+                rows = [f"{a.get('label', '')} {a.get('text', '')}".strip()
+                        for a in sec.get('attributes', []) if a.get('text')]
+                if rows:
+                    parts.append(f"{sec.get('title') or ''}\n" + '\n'.join(rows))
+        images = []
+        for item in secs.get('MEDIA', {}).get('media', []):
+            if item.get('type') != 'PICTURE':
+                continue
+            u = item.get('fullImageUrl') or item.get('previewImageUrl')
+            if u and u not in images:
+                images.append(u)
+
         return ScrapedListing(
             ad_id=str(ad_id),
             url=f'https://www.immobilienscout24.de/expose/{ad_id}',
@@ -192,6 +213,9 @@ class ImmoScoutSource(Source):
             image_url=image_url,
             price=price,
             price_text=price_text,
+            description='\n\n'.join(parts) or None,
+            images=images,
+            raw_html=json.dumps(data, ensure_ascii=False),
         )
 
     # ── search ───────────────────────────────────────────────────────────────

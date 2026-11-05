@@ -305,7 +305,8 @@ def listing_version_html(listing_id, version):
     if html is None:
         abort(404)
     # Archived third-party page: serve as inert text/plain-sandboxed document.
-    return Response(html, mimetype='text/html',
+    mime = 'application/json' if html.lstrip().startswith('{') else 'text/html'  # ImmoScout archives raw JSON
+    return Response(html, mimetype=mime,
                     headers={'Content-Security-Policy': 'sandbox; script-src \'none\'',
                              'X-Content-Type-Options': 'nosniff'})
 

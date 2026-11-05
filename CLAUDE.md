@@ -42,13 +42,14 @@ implements:
 
 Register a new source by appending an instance to `_all` in
 `sources/__init__.py`. A source that can't support a URL type returns
-`UrlInfo(supported=False, note=…)` (e.g. ImmoScout single listings).
+`UrlInfo(supported=False, note=…)`.
 
 Implemented sources:
 - **`kleinanzeigen`** — classifieds; search **and** single listings. Plain
   browser-like HTTP + BeautifulSoup. Search pagination injects `seite:N` after
   `/s-`; count comes from the results `<h1>`.
-- **`immoscout`** — real estate; **search only** (`/expose/{id}` is WAF-blocked).
+- **`immoscout`** — real estate; search **and** single listings (via the mobile
+  `/expose/{id}` API; the website expose pages are WAF-blocked).
   A pasted web search URL (`/Suche/de/<land>/<kreis>[/<ort>]/<objektart-slug>` or
   a `/Suche/radius/…?geocoordinates=lat;lon;r` URL) is parsed and translated into
   a mobile-API call (`api.mobile.immobilienscout24.de/search`, mobile UA);
@@ -144,8 +145,10 @@ schema (no `trackers.source` column). No backward compatibility is maintained.
   with a **mobile User-Agent** (`ImmoScout24_1410_30_._`); paginate via
   `numberOfPages`. Item fields: `id`, `title`, `address.line`, first `attributes`
   entry with `€`, `titlePicture.preview`.
-- The website HTML (`/expose`, `/Suche`) and the mobile `/expose/{id}` detail are
-  bot/WAF-blocked → single listings unsupported.
+- The website HTML (`/expose`, `/Suche`) is bot/WAF-blocked, but the mobile
+  `https://api.mobile.immobilienscout24.de/expose/{id}` (same mobile UA) works and
+  returns the full expose JSON (MEDIA, TOP_ATTRIBUTES, ATTRIBUTE_LIST, TEXT_AREA, MAP, …);
+  it is archived verbatim as `raw_html` (JSON).
 
 ## Deployment (Ubuntu VPS, webapps@168.119.115.32)
 

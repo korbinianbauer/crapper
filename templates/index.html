@@ -369,7 +369,7 @@ async function toggleVersions(id, btn) {
       ${esc(v.title)} · ${esc(v.location) || '—'}
       ${v.description ? `<details><summary>Beschreibung</summary><div style="white-space:pre-wrap">${esc(v.description)}</div></details>` : ''}
       ${v.image_file ? `<a href="/archive/img/${esc(v.image_file)}" target="_blank">Bild</a>` : ''}
-      ${v.has_html ? ` <a href="/listing/${id}/version/${v.version}/html" target="_blank">Original-HTML</a>` : ''}
+      ${v.has_html ? ` <a href="/listing/${id}/version/${v.version}/html" target="_blank">Original (HTML/JSON)</a>` : ''}
     </div>`).join('') || '<div class="meta">Keine Versionen.</div>';
 }
 
