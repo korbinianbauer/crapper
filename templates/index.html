@@ -325,7 +325,7 @@ function listingCardHtml(c) {
     <div class="head">
       ${thumb}
       <div style="flex:1; min-width:0;">
-        <div class="title"><a href="${LOGGED_IN ? '/listing/' + c.id + '/archive' : esc(c.url)}"${LOGGED_IN ? '' : ' target="_blank" rel="noopener"'}>${esc(c.title)}</a></div>
+        <div class="title"><a href="/listing/${c.id}/archive">${esc(c.title)}</a></div>
         <div class="meta">${esc(c.location) || '—'}</div>
         <div class="meta tracker-tag">
           <span class="badge badge-grey">${esc(c.source_name)}</span> ${kinds} ${esc(c.tracker_labels)}
