@@ -378,6 +378,22 @@ def get_versions(listing_id: int) -> list[dict]:
             (listing_id,))]
 
 
+def get_listing(listing_id: int) -> dict | None:
+    with get_db() as conn:
+        r = conn.execute('SELECT * FROM listings WHERE id = ?', (listing_id,)).fetchone()
+    return dict(r) if r else None
+
+
+def get_version_images(listing_id: int, version: int) -> list[str]:
+    with get_db() as conn:
+        r = conn.execute('SELECT images FROM listing_versions WHERE listing_id = ? '
+                         'AND version = ?', (listing_id, version)).fetchone()
+    try:
+        return json.loads(r[0]) if r and r[0] else []
+    except ValueError:
+        return []
+
+
 def get_version_html(listing_id: int, version: int) -> str | None:
     with get_db() as conn:
         r = conn.execute('SELECT raw_html FROM listing_versions WHERE listing_id = ? '

@@ -31,3 +31,12 @@ def download_image(url: str) -> str | None:
     with open(os.path.join(IMG_DIR, name), 'wb') as f:
         f.write(r.content)
     return name
+
+
+def local_name(url: str) -> str | None:
+    """File name of an already archived copy of *url*, if any (no download)."""
+    key = hashlib.sha1(url.encode()).hexdigest()
+    for ext in _TYPES.values():
+        if os.path.exists(os.path.join(IMG_DIR, key + ext)):
+            return key + ext
+    return None

@@ -117,7 +117,7 @@
       <tr style="border-top:1px solid var(--border);">
         <td style="padding:.5rem .4rem; width:100%;">
           <span class="badge badge-grey">{{ h.source_name }}</span>
-          <a href="{{ h.url }}" target="_blank" rel="noopener" style="color:var(--text);">{{ h.title }}</a>
+          <a href="{{ url_for('listing_archive', listing_id=h.id) }}" style="color:var(--text);">{{ h.title }}</a>
           <div class="muted" style="font-size:.72rem;">{{ h.location or '—' }}</div>
         </td>
         <td style="padding:.5rem .4rem; text-align:right;">
@@ -325,7 +325,7 @@ function listingCardHtml(c) {
     <div class="head">
       ${thumb}
       <div style="flex:1; min-width:0;">
-        <div class="title"><a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.title)}</a></div>
+        <div class="title"><a href="${LOGGED_IN ? '/listing/' + c.id + '/archive' : esc(c.url)}"${LOGGED_IN ? '' : ' target="_blank" rel="noopener"'}>${esc(c.title)}</a></div>
         <div class="meta">${esc(c.location) || '—'}</div>
         <div class="meta tracker-tag">
           <span class="badge badge-grey">${esc(c.source_name)}</span> ${kinds} ${esc(c.tracker_labels)}
@@ -334,8 +334,6 @@ function listingCardHtml(c) {
     </div>
     <div class="row"><span class="price">${esc(c.current_price)}</span> ${badge}</div>
     <div class="chart" id="chart-${c.id}"></div>
-    ${LOGGED_IN ? `<div style="text-align:right;"><button class="btn btn-outline btn-sm" type="button"
-        onclick="toggleVersions(${c.id}, this)">🗂 Versionen</button></div><div class="versions" id="ver-${c.id}"></div>` : ''}
     ${hide}
   </div>`;
 }
@@ -357,20 +355,6 @@ function openTracker(id) {
   detail.style.display = 'block';
   cards.forEach(renderListingChart);
   window.scrollTo(0, 0);
-}
-
-async function toggleVersions(id, btn) {
-  const box = document.getElementById('ver-' + id);
-  if (box.innerHTML) { box.innerHTML = ''; return; }
-  const vs = await (await fetch('/listing/' + id + '/versions')).json();
-  box.innerHTML = vs.map(v => `
-    <div class="meta" style="border-top:1px solid var(--border,#334155);padding:.4rem 0;">
-      <b>v${v.version}</b> · ${esc(v.fetched_at.slice(0, 16).replace('T', ' '))}<br>
-      ${esc(v.title)} · ${esc(v.location) || '—'}
-      ${v.description ? `<details><summary>Beschreibung</summary><div style="white-space:pre-wrap">${esc(v.description)}</div></details>` : ''}
-      ${v.image_file ? `<a href="/archive/img/${esc(v.image_file)}" target="_blank">Bild</a>` : ''}
-      ${v.has_html ? ` <a href="/listing/${id}/version/${v.version}/html" target="_blank">Original (HTML/JSON)</a>` : ''}
-    </div>`).join('') || '<div class="meta">Keine Versionen.</div>';
 }
 
 function closeTracker() {

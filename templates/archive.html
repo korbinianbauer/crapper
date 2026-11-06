@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}Archiv · {{ cur.title }}{% endblock %}
+{% block head %}
+<style>
+  .wb-bar { padding: 1rem 1.25rem 1.6rem; }
+  .wb-top { display:flex; flex-wrap:wrap; gap:.6rem 1rem; align-items:center; justify-content:space-between; margin-bottom:1.1rem; }
+  .wb-axis { position:relative; height:46px; margin:0 14px; }
+  .wb-axis::before { content:""; position:absolute; left:0; right:0; top:22px; height:3px; background:var(--border); border-radius:2px; }
+  .wb-tick { position:absolute; top:12px; width:14px; height:24px; margin-left:-7px; display:block;
+             text-decoration:none; }
+  .wb-tick::before { content:""; position:absolute; left:3px; top:0; width:8px; height:24px; border-radius:4px;
+                     background:var(--muted); transition:background .15s, transform .15s; }
+  .wb-tick:hover::before { background:var(--text); transform:scaleY(1.2); }
+  .wb-tick.cur::before { background:var(--primary); box-shadow:0 0 0 3px rgba(34,197,94,.25); }
+  .wb-tick .tip { display:none; position:absolute; bottom:30px; left:50%; transform:translateX(-50%);
+                  background:var(--surface-2); border:1px solid var(--border); border-radius:6px;
+                  padding:.2rem .5rem; font-size:.72rem; white-space:nowrap; color:var(--text); z-index:5; }
+  .wb-tick:hover .tip { display:block; }
+  .wb-ends { display:flex; justify-content:space-between; font-size:.72rem; color:var(--muted); margin:.1rem 14px 0; }
+  .wb-body { display:grid; grid-template-columns: minmax(0,1fr) minmax(0,2fr); gap:1.25rem; margin-top:1.25rem; }
+  @media (max-width:800px) { .wb-body { grid-template-columns:1fr; } }
+  .wb-imgs img { width:100%; border-radius:8px; margin-bottom:.6rem; display:block; background:var(--surface-2); }
+  .wb-desc { white-space:pre-wrap; line-height:1.5; font-size:.92rem; }
+  .wb-banner { font-size:.8rem; color:var(--muted); }
+</style>
+{% endblock %}
+{% block content %}
+{% set n = versions|length %}
+<div class="card wb-bar">
+  <div class="wb-top">
+    <div>
+      <div class="wb-banner"><span class="badge badge-grey">{{ source_name }}</span>
+        Archivversion <b>v{{ cur.version }}</b> von {{ n }} · gespeichert am
+        <b>{{ cur.fetched_at[:16].replace('T', ' ') }}</b></div>
+    </div>
+    <div style="display:flex; gap:.5rem; flex-wrap:wrap;">
+      {% if idx > 0 %}<a class="btn btn-outline btn-sm" href="?v={{ versions[idx-1].version }}">← Ältere</a>{% endif %}
+      {% if idx < n - 1 %}<a class="btn btn-outline btn-sm" href="?v={{ versions[idx+1].version }}">Neuere →</a>
+        <a class="btn btn-outline btn-sm" href="{{ url_for('listing_archive', listing_id=listing.id) }}">Neueste</a>{% endif %}
+      <a class="btn btn-outline btn-sm" href="{{ listing.url }}" target="_blank" rel="noopener">Live bei {{ source_name }} ↗</a>
+    </div>
+  </div>
+
+  <div class="wb-axis" id="axis">
+    {% for v in versions %}
+    <a class="wb-tick {{ 'cur' if loop.index0 == idx }}" data-t="{{ v.fetched_at }}"
+       href="?v={{ v.version }}" aria-label="v{{ v.version }}">
+      <span class="tip">v{{ v.version }} · {{ v.fetched_at[:16].replace('T', ' ') }}</span>
+    </a>
+    {% endfor %}
+  </div>
+  <div class="wb-ends"><span>{{ versions[0].fetched_at[:10] }}</span><span>{{ versions[-1].fetched_at[:10] }}</span></div>
+</div>
+
+<div class="card" style="margin-top:1.25rem;">
+  <h1>{{ cur.title }}</h1>
+  <div class="muted">{{ cur.location or '—' }}
+    {% if not listing.active %}· <span class="badge badge-red">verschwunden</span>{% endif %}</div>
+  {% if price %}<div style="font-size:1.4rem; font-weight:700; color:var(--primary); margin-top:.5rem;">{{ price }}</div>{% endif %}
+
+  <div class="wb-body">
+    <div class="wb-imgs">
+      {% for im in images %}<a href="{{ im.src }}" target="_blank" rel="noopener"><img src="{{ im.src }}" loading="lazy" alt=""></a>
+      {% else %}<div class="muted">Keine Bilder archiviert.</div>{% endfor %}
+    </div>
+    <div>
+      {% if cur.description %}<div class="wb-desc">{{ cur.description }}</div>
+      {% else %}<div class="muted">Keine Beschreibung archiviert (nur Suchtreffer-Daten).</div>{% endif %}
+      {% if cur.has_html %}<p style="margin-top:1.25rem;">
+        <a class="btn btn-outline btn-sm" href="{{ url_for('listing_version_html', listing_id=listing.id, version=cur.version) }}"
+           target="_blank">Originalseite (HTML/JSON) ↗</a></p>{% endif %}
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+// Place ticks proportionally to time (like the Wayback Machine); fall back to even spacing.
+(function () {
+  const ticks = [...document.querySelectorAll('#axis .wb-tick')];
+  const ts = ticks.map(t => Date.parse(t.dataset.t));
+  const lo = Math.min(...ts), hi = Math.max(...ts);
+  ticks.forEach((t, i) => {
+    const pct = hi > lo ? (ts[i] - lo) / (hi - lo) * 100 : (ticks.length > 1 ? i / (ticks.length - 1) * 100 : 50);
+    t.style.left = pct + '%';
+  });
+})();
+</script>
+{% endblock %}

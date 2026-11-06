@@ -298,6 +298,32 @@ def listing_versions(listing_id):
     return jsonify(db.get_versions(listing_id))
 
 
+@app.route('/listing/<int:listing_id>/archive')
+@login_required
+def listing_archive(listing_id):
+    """Wayback-style view: newest archived version by default, timeline of all versions."""
+    listing = db.get_listing(listing_id)
+    if not listing:
+        abort(404)
+    versions = sorted(db.get_versions(listing_id), key=lambda v: v['version'])
+    if not versions:
+        abort(404)
+    want = request.args.get('v', type=int)
+    idx = next((i for i, v in enumerate(versions) if v['version'] == want), len(versions) - 1)
+    cur = versions[idx]
+    images = []
+    for u in db.get_version_images(listing_id, cur['version']) or ([cur['image_url']] if cur['image_url'] else []):
+        images.append({'url': u, 'src': ('/archive/img/' + archive.local_name(u)) if archive.local_name(u) else u})
+    # price valid at the time of this version = last observation up to the next version
+    end = versions[idx + 1]['fetched_at'] if idx + 1 < len(versions) else '9999'
+    prices = [p for p in db.get_price_history(listing_id) if p['observed_at'] < end]
+    price = prices[-1]['price_text'] if prices else None
+    source_names = {s.name: s.display_name for s in sources.all_sources()}
+    return render_template('archive.html', listing=listing, versions=versions, cur=cur,
+                           idx=idx, images=images, price=price,
+                           source_name=source_names.get(listing['source'], listing['source']))
+
+
 @app.route('/listing/<int:listing_id>/version/<int:version>/html')
 @login_required
 def listing_version_html(listing_id, version):
