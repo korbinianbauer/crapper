@@ -299,7 +299,6 @@ def listing_versions(listing_id):
 
 
 @app.route('/listing/<int:listing_id>/archive')
-@login_required
 def listing_archive(listing_id):
     """Wayback-style view: newest archived version by default, timeline of all versions."""
     listing = db.get_listing(listing_id)
@@ -325,7 +324,6 @@ def listing_archive(listing_id):
 
 
 @app.route('/listing/<int:listing_id>/version/<int:version>/html')
-@login_required
 def listing_version_html(listing_id, version):
     html = db.get_version_html(listing_id, version)
     if html is None:
