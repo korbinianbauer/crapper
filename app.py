@@ -1,4 +1,5 @@
 import hmac
+import re
 import logging
 import os
 import secrets
@@ -9,6 +10,7 @@ import time
 from collections import defaultdict
 from functools import wraps
 
+from bs4 import BeautifulSoup
 from flask import (Flask, Response, abort, flash, jsonify, redirect, render_template,
                    request, send_from_directory, session, url_for)
 
@@ -318,9 +320,42 @@ def listing_archive(listing_id):
     prices = [p for p in db.get_price_history(listing_id) if p['observed_at'] < end]
     price = prices[-1]['price_text'] if prices else None
     source_names = {s.name: s.display_name for s in sources.all_sources()}
+    raw = db.get_version_html(listing_id, cur['version']) if cur['has_html'] else None
+    has_page = bool(raw) and not raw.lstrip().startswith('{')   # ImmoScout archives JSON, not a page
     return render_template('archive.html', listing=listing, versions=versions, cur=cur,
-                           idx=idx, images=images, price=price,
+                           idx=idx, images=images, price=price, has_page=has_page,
                            source_name=source_names.get(listing['source'], listing['source']))
+
+
+@app.route('/listing/<int:listing_id>/version/<int:version>/page')
+def listing_version_page(listing_id, version):
+    """The archived original page, as it was fetched, for the archive iframe. Scripts
+    are stripped and the response is sandboxed; CSS/fonts load from the origin via
+    <base>, images from our local archive where we have a copy."""
+    raw = db.get_version_html(listing_id, version)
+    listing = db.get_listing(listing_id)
+    if raw is None or not listing:
+        abort(404)
+    for u in db.get_version_images(listing_id, version):
+        if name := archive.local_name(u):
+            raw = raw.replace(u, request.host_url + 'archive/img/' + name)
+    soup = BeautifulSoup(raw, 'lxml')
+    for t in soup.find_all(['script', 'iframe', 'object', 'embed']):
+        t.decompose()
+    for t in soup.find_all('meta', attrs={'http-equiv': re.compile('refresh', re.I)}):
+        t.decompose()
+    for t in soup.find_all(True):
+        for a in [a for a in t.attrs if a.lower().startswith('on')]:
+            del t.attrs[a]
+    head = soup.head or soup.new_tag('head')
+    if soup.head is None and soup.html is not None:
+        soup.html.insert(0, head)
+    base = soup.new_tag('base', href=listing['url'], target='_blank')
+    head.insert(0, base)
+    return Response(str(soup), mimetype='text/html', headers={
+        'Content-Security-Policy': "sandbox allow-popups allow-popups-to-escape-sandbox; "
+                                   "script-src 'none'; object-src 'none'",
+        'X-Content-Type-Options': 'nosniff'})
 
 
 @app.route('/listing/<int:listing_id>/version/<int:version>/html')

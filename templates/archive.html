@@ -21,6 +21,8 @@
   @media (max-width:800px) { .wb-body { grid-template-columns:1fr; } }
   .wb-imgs img { width:100%; border-radius:8px; margin-bottom:.6rem; display:block; background:var(--surface-2); }
   .wb-desc { white-space:pre-wrap; line-height:1.5; font-size:.92rem; }
+  .wb-frame { display:block; width:100%; height:85vh; margin-top:1.25rem; border:1px solid var(--border);
+              border-radius:var(--radius); background:#fff; }
   .wb-banner { font-size:.8rem; color:var(--muted); }
 </style>
 {% endblock %}
@@ -52,26 +54,36 @@
   <div class="wb-ends"><span>{{ versions[0].fetched_at[:10] }}</span><span>{{ versions[-1].fetched_at[:10] }}</span></div>
 </div>
 
+{% if has_page %}
+<iframe class="wb-frame" src="{{ url_for('listing_version_page', listing_id=listing.id, version=cur.version) }}"
+        sandbox="allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer"
+        title="Archivierte Seite v{{ cur.version }}"></iframe>
+<p class="muted" style="font-size:.78rem; margin-top:.5rem;">
+  Archivierte Originalseite ohne Skripte.
+  <a style="color:var(--muted);" href="{{ url_for('listing_version_html', listing_id=listing.id, version=cur.version) }}" target="_blank">Rohdaten (HTML)</a></p>
+{% else %}
 <div class="card" style="margin-top:1.25rem;">
+  <p class="muted" style="font-size:.8rem; margin-bottom:.8rem;">
+    {% if cur.has_html %}Für diese Quelle wird keine Seite, sondern Rohdaten archiviert – hier die extrahierte Darstellung.
+    {% else %}Zu dieser Version wurde keine Originalseite gespeichert (Anzeige war nur als Suchtreffer bekannt) – hier die extrahierten Daten.{% endif %}</p>
   <h1>{{ cur.title }}</h1>
   <div class="muted">{{ cur.location or '—' }}
     {% if not listing.active %}· <span class="badge badge-red">verschwunden</span>{% endif %}</div>
   {% if price %}<div style="font-size:1.4rem; font-weight:700; color:var(--primary); margin-top:.5rem;">{{ price }}</div>{% endif %}
-
   <div class="wb-body">
     <div class="wb-imgs">
       {% for im in images %}<a href="{{ im.src }}" target="_blank" rel="noopener"><img src="{{ im.src }}" loading="lazy" alt=""></a>
       {% else %}<div class="muted">Keine Bilder archiviert.</div>{% endfor %}
     </div>
     <div>
-      {% if cur.description %}<div class="wb-desc">{{ cur.description }}</div>
-      {% else %}<div class="muted">Keine Beschreibung archiviert (nur Suchtreffer-Daten).</div>{% endif %}
+      {% if cur.description %}<div class="wb-desc">{{ cur.description }}</div>{% endif %}
       {% if cur.has_html %}<p style="margin-top:1.25rem;">
         <a class="btn btn-outline btn-sm" href="{{ url_for('listing_version_html', listing_id=listing.id, version=cur.version) }}"
-           target="_blank">Originalseite (HTML/JSON) ↗</a></p>{% endif %}
+           target="_blank">Rohdaten (JSON) ↗</a></p>{% endif %}
     </div>
   </div>
 </div>
+{% endif %}
 {% endblock %}
 {% block scripts %}
 <script>
