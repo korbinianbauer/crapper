@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 
 import archive
 import db
+import pagearchive
 import sources
 
 logger = logging.getLogger(__name__)
@@ -115,3 +116,7 @@ def poll_all_due():
             poll_tracker(tracker)
         except Exception as e:
             logger.error('Poll failed for tracker %d: %s', tracker['id'], e)
+    try:    # stylesheets/fonts/images of all newly stored pages (and the old backlog)
+        pagearchive.archive_pending()
+    except Exception as e:
+        logger.error('Asset archiving failed: %s', e)

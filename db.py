@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import zlib
+from datetime import datetime
 from contextlib import contextmanager
 
 DB_PATH = os.path.join(os.path.dirname(__file__), 'crapper.db')
@@ -108,6 +109,20 @@ def init_db():
                 UNIQUE(listing_id, version)
             );
 
+            -- Content-addressed page assets (css/fonts/images); files in archive/assets/<hash>.
+            CREATE TABLE IF NOT EXISTS assets (
+                hash         TEXT PRIMARY KEY,
+                content_type TEXT NOT NULL,
+                size         INTEGER NOT NULL
+            );
+            -- Which asset an original URL resolved to when a page version was archived.
+            CREATE TABLE IF NOT EXISTS version_assets (
+                version_id INTEGER NOT NULL REFERENCES listing_versions(id) ON DELETE CASCADE,
+                url        TEXT NOT NULL,
+                hash       TEXT NOT NULL,
+                PRIMARY KEY (version_id, url)
+            );
+
             CREATE TABLE IF NOT EXISTS settings (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL DEFAULT ''
@@ -121,6 +136,9 @@ def init_db():
             'hidden': 'INTEGER NOT NULL DEFAULT 0',   # hidden from the frontpage by the user
             'detail_at': 'TEXT',                      # last full-page archive (ISO UTC)
             'image_file': 'TEXT',                     # locally archived copy of image_url
+        })
+        _add_columns_if_missing(conn, 'listing_versions', {
+            'assets_at': 'TEXT',                      # when this page's assets were archived
         })
         # Seed v1 for listings that predate versioning.
         conn.execute('''
@@ -392,6 +410,57 @@ def get_version_images(listing_id: int, version: int) -> list[str]:
         return json.loads(r[0]) if r and r[0] else []
     except ValueError:
         return []
+
+
+def put_asset(h: str, content_type: str, size: int):
+    with get_db() as conn:
+        conn.execute('INSERT OR IGNORE INTO assets (hash, content_type, size) VALUES (?, ?, ?)',
+                     (h, content_type, size))
+
+
+def get_asset(h: str) -> dict | None:
+    with get_db() as conn:
+        r = conn.execute('SELECT * FROM assets WHERE hash = ?', (h,)).fetchone()
+    return dict(r) if r else None
+
+
+def save_version_assets(version_id: int, mapping: dict[str, str]):
+    with get_db() as conn:
+        conn.executemany(
+            'INSERT OR REPLACE INTO version_assets (version_id, url, hash) VALUES (?, ?, ?)',
+            [(version_id, u, h) for u, h in mapping.items()])
+
+
+def mark_assets_done(version_id: int):
+    with get_db() as conn:
+        conn.execute('UPDATE listing_versions SET assets_at = ? WHERE id = ?',
+                     (datetime.utcnow().isoformat(), version_id))
+
+
+def versions_pending_assets():
+    """Yield stored page versions whose assets have not been archived yet, newest
+    first (loaded one at a time: the pages are big)."""
+    with get_db() as conn:
+        ids = [r[0] for r in conn.execute(
+            'SELECT id FROM listing_versions WHERE raw_html IS NOT NULL AND assets_at IS NULL '
+            'ORDER BY fetched_at DESC')]
+    for vid in ids:
+        with get_db() as conn:
+            r = conn.execute(
+                '''SELECT v.id, v.listing_id, v.version, v.raw_html, l.url
+                   FROM listing_versions v JOIN listings l ON l.id = v.listing_id
+                   WHERE v.id = ?''', (vid,)).fetchone()
+        if r and r['raw_html']:
+            yield {'id': r['id'], 'listing_id': r['listing_id'], 'version': r['version'],
+                   'url': r['url'], 'html': zlib.decompress(r['raw_html']).decode()}
+
+
+def get_version_assets(listing_id: int, version: int) -> dict[str, str]:
+    with get_db() as conn:
+        return {r['url']: r['hash'] for r in conn.execute(
+            '''SELECT a.url, a.hash FROM version_assets a
+               JOIN listing_versions v ON v.id = a.version_id
+               WHERE v.listing_id = ? AND v.version = ?''', (listing_id, version))}
 
 
 def get_version_html(listing_id: int, version: int) -> str | None:

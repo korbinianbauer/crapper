@@ -88,6 +88,7 @@ count, summary}` (or an error) — the frontend calls it live as the user pastes
 | `sources/base.py` | `Source` ABC + `ScrapedListing` / `UrlInfo` |
 | `sources/__init__.py` | `REGISTRY`, `get`, `all_sources`, `source_for_url` |
 | `sources/kleinanzeigen.py`, `sources/immoscout.py` | the two sources |
+| `pagearchive.py` | archives a stored page's CSS/fonts/images (Wayback-style) + helpers to rewrite them |
 | `poller.py` | `poll_tracker()` / `poll_all_due()` — orchestrates source → DB |
 | `poll.py` | APScheduler cron loop (separate process) |
 | `templates/index.html` | Listing grid + Plotly charts + single add-by-URL modal with live `/inspect` preview |
@@ -110,6 +111,14 @@ count, summary}` (or an error) — the frontend calls it live as the user pastes
   previous version. Empty titles / placeholder images never overwrite stored values
   (`db.upsert_listing`). Images are downloaded to `archive/images/` (`archive.py`)
   and served via `/archive/img/<file>`; the UI falls back to the remote URL.
+- **`assets`** / **`version_assets`** — the archived page is *self-contained*
+  (`pagearchive.py`): after each poll `archive_pending()` fetches every stylesheet
+  (recursively: `@import`, `url()`), font and image a stored `raw_html` references into
+  content-addressed `archive/assets/<hash>` (stylesheets stored with refs rewritten to
+  `archive-asset:<hash>` tokens). `version_assets` maps each version's original URLs to
+  hashes, so old versions keep the look they had. `/listing/<id>/version/<v>/page`
+  serves the page (scripts stripped, sandboxed) with URLs rewritten to
+  `/archive/asset/<hash>`. Only css/image/font types are stored; fetches are SSRF-guarded.
 - **`settings`** — `poll_cron` (default `0 4 * * *`), `search_pages`.
 
 `init_db()` drops & recreates the data tables if it detects a pre-multi-source

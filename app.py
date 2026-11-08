@@ -15,6 +15,7 @@ from flask import (Flask, Response, abort, flash, jsonify, redirect, render_temp
                    request, send_from_directory, session, url_for)
 
 import archive
+import pagearchive
 import db
 import sources
 from poller import poll_tracker
@@ -294,6 +295,24 @@ def archive_image(name):
     return send_from_directory(archive.IMG_DIR, name, max_age=86400 * 30)
 
 
+@app.route('/archive/asset/<h>')
+def archive_asset(h):
+    if not re.fullmatch(r'[0-9a-f]{40}', h):
+        abort(404)
+    got = pagearchive.read_asset(h)
+    if not got:
+        abort(404)
+    data, ctype = got
+    if ctype == 'text/css':
+        data = pagearchive.resolve_tokens(data, '//' + request.host + '/')
+        ctype += '; charset=utf-8'
+    return Response(data, mimetype=None, content_type=ctype, headers={
+        'Cache-Control': 'public, max-age=31536000, immutable',
+        'Access-Control-Allow-Origin': '*',      # fonts from the sandboxed (opaque-origin) page
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'"})
+
+
 @app.route('/listing/<int:listing_id>/versions')
 @login_required
 def listing_versions(listing_id):
@@ -330,16 +349,23 @@ def listing_archive(listing_id):
 @app.route('/listing/<int:listing_id>/version/<int:version>/page')
 def listing_version_page(listing_id, version):
     """The archived original page, as it was fetched, for the archive iframe. Scripts
-    are stripped and the response is sandboxed; CSS/fonts load from the origin via
-    <base>, images from our local archive where we have a copy."""
+    are stripped and the response is sandboxed; stylesheets, fonts and images come from
+    our own asset archive (state at archive time), not from the origin."""
     raw = db.get_version_html(listing_id, version)
     listing = db.get_listing(listing_id)
     if raw is None or not listing:
         abort(404)
-    for u in db.get_version_images(listing_id, version):
-        if name := archive.local_name(u):
-            raw = raw.replace(u, request.host_url + 'archive/img/' + name)
     soup = BeautifulSoup(raw, 'lxml')
+    mapping = db.get_version_assets(listing_id, version)
+    root = '//' + request.host + '/'    # scheme-relative: behind a proxy host_url may say http
+
+    def local(u):    # archived copy of this asset (as of this version), else the old image archive
+        if u in mapping:
+            return root + 'archive/asset/' + mapping[u]
+        if name := archive.local_name(u):
+            return root + 'archive/img/' + name
+        return None
+    pagearchive.walk_page(soup, listing['url'], local)
     for t in soup.find_all(['script', 'iframe', 'object', 'embed']):
         t.decompose()
     for t in soup.find_all('meta', attrs={'http-equiv': re.compile('refresh', re.I)}):
