@@ -300,6 +300,15 @@ function renderIndexChart(el, trend) {
   const idx = trend.map(p => p.index * 100);
   const med = trend.map(p => p.median);
   if (trend.length === 1) { xs.push(new Date()); idx.push(idx[0]); med.push(med[0]); }
+  // Both y-axes share one scale: median axis = k × index axis, so a relative
+  // change is equally tall on both lines. k maps the highest index to the
+  // highest median; the visible range is the union of both series.
+  const medVals = med.filter(v => v != null);
+  const k = medVals.length ? Math.max(...medVals) / Math.max(...idx) : 1;
+  const lo = Math.min(Math.min(...idx), medVals.length ? Math.min(...medVals) / k : Infinity);
+  const hi = Math.max(...idx);
+  const pad = Math.max((hi - lo) * 0.08, 1);
+  const r1 = [lo - pad, hi + pad];
   const color = idx[idx.length - 1] >= 100 ? '#22c55e' : '#3b82f6';
   Plotly.newPlot(el, [{
     x: xs, y: idx, type: 'scatter', mode: 'lines', name: 'Index',
@@ -312,8 +321,9 @@ function renderIndexChart(el, trend) {
   }], Object.assign({}, CHART_LAYOUT, {
     margin: {l: 48, r: 56, t: 6, b: 24},
     showlegend: false,
-    yaxis: {gridcolor: '#334155', ticksuffix: ' %', zeroline: false},
+    yaxis: {gridcolor: '#334155', ticksuffix: ' %', zeroline: false, range: r1},
     yaxis2: {overlaying: 'y', side: 'right', showgrid: false, tickformat: ',.0f',
+             range: medVals.length ? [r1[0] * k, r1[1] * k] : undefined,
              ticksuffix: ' €', tickfont: {color: '#f59e0b'}, zeroline: false},
     shapes: [{type: 'line', xref: 'paper', x0: 0, x1: 1, y0: 100, y1: 100,
               line: {color: '#475569', width: 1, dash: 'dot'}}],
