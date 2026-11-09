@@ -1,3 +1,4 @@
+import difflib
 import hmac
 import re
 import logging
@@ -332,19 +333,59 @@ def listing_archive(listing_id):
     want = request.args.get('v', type=int)
     idx = next((i for i, v in enumerate(versions) if v['version'] == want), len(versions) - 1)
     cur = versions[idx]
-    images = []
-    for u in db.get_version_images(listing_id, cur['version']) or ([cur['image_url']] if cur['image_url'] else []):
-        images.append({'url': u, 'src': ('/archive/img/' + archive.local_name(u)) if archive.local_name(u) else u})
-    # price valid at the time of this version = last observation up to the next version
-    end = versions[idx + 1]['fetched_at'] if idx + 1 < len(versions) else '9999'
-    prices = [p for p in db.get_price_history(listing_id) if p['observed_at'] < end]
-    price = prices[-1]['price_text'] if prices else None
+    prev = versions[idx - 1] if idx > 0 else None
+    prices = db.get_price_history(listing_id)
+
+    def price_at(i):    # price valid at version i = last observation before the next version
+        end = versions[i + 1]['fetched_at'] if i + 1 < len(versions) else '9999'
+        seen = [p['price_text'] for p in prices if p['observed_at'] < end]
+        return seen[-1] if seen else None
+
+    def image_urls(v):
+        return db.get_version_images(listing_id, v['version']) or ([v['image_url']] if v['image_url'] else [])
+
+    def img(u):
+        return {'url': u, 'src': ('/archive/img/' + archive.local_name(u)) if archive.local_name(u) else u}
+
+    price = price_at(idx)
+    cur_imgs = image_urls(cur)
+    prev_imgs = image_urls(prev) if prev else []
+    images = [dict(img(u), new=bool(prev) and u not in prev_imgs) for u in cur_imgs]
+    removed_images = [img(u) for u in prev_imgs if u not in cur_imgs] if prev else []
+    diff = None
+    if prev:
+        diff = {k: _wdiff(o, n) for k, o, n in (
+            ('title', prev['title'], cur['title']),
+            ('location', prev['location'], cur['location']),
+            ('description', prev['description'], cur['description']),
+            ('price', price_at(idx - 1), price))}
+        diff = {k: {'segs': v, 'changed': any(op != 'eq' for op, _ in v)} for k, v in diff.items()}
+        diff['images'] = {'changed': bool(removed_images or any(i['new'] for i in images))}
     source_names = {s.name: s.display_name for s in sources.all_sources()}
     raw = db.get_version_html(listing_id, cur['version']) if cur['has_html'] else None
     has_page = bool(raw) and not raw.lstrip().startswith('{')   # ImmoScout archives JSON, not a page
-    return render_template('archive.html', listing=listing, versions=versions, cur=cur,
-                           idx=idx, images=images, price=price, has_page=has_page,
+    view = request.args.get('view')
+    if view not in ('page', 'data') or (view == 'page' and not has_page):
+        view = 'page' if has_page else 'data'
+    return render_template('archive.html', listing=listing, versions=versions, cur=cur, prev=prev,
+                           idx=idx, images=images, removed_images=removed_images, diff=diff,
+                           price=price, has_page=has_page, view=view,
                            source_name=source_names.get(listing['source'], listing['source']))
+
+
+def _wdiff(old, new):
+    """Word-level diff as [(op, text)], op in eq/ins/del."""
+    a, b = re.findall(r'\s+|\S+', old or ''), re.findall(r'\s+|\S+', new or '')
+    segs = []
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if op == 'equal':
+            segs.append(('eq', ''.join(a[i1:i2])))
+            continue
+        if i2 > i1:
+            segs.append(('del', ''.join(a[i1:i2])))
+        if j2 > j1:
+            segs.append(('ins', ''.join(b[j1:j2])))
+    return segs
 
 
 @app.route('/listing/<int:listing_id>/version/<int:version>/page')

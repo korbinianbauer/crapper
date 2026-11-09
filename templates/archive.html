@@ -23,6 +23,15 @@
   .wb-desc { white-space:pre-wrap; line-height:1.5; font-size:.92rem; }
   .wb-frame { display:block; width:100%; height:85vh; margin-top:1.25rem; border:1px solid var(--border);
               border-radius:var(--radius); background:#fff; }
+  .wb-tabs { display:flex; gap:.4rem; margin-top:1.25rem; }
+  .wb-tabs a { padding:.4rem .9rem; border-radius:8px; border:1px solid var(--border); color:var(--muted);
+               text-decoration:none; font-size:.85rem; font-weight:600; }
+  .wb-tabs a.on { background:var(--surface-2); color:var(--text); border-color:var(--primary); }
+  .d-ins { background:rgba(34,197,94,.25); border-radius:3px; }
+  .d-del { background:rgba(239,68,68,.25); text-decoration:line-through; border-radius:3px; }
+  .d-note { font-size:.78rem; color:var(--muted); margin:.15rem 0 .5rem; }
+  .wb-imgs .new { outline:3px solid var(--primary); }
+  .wb-imgs .gone { outline:3px solid var(--danger); opacity:.55; }
   .wb-banner { font-size:.8rem; color:var(--muted); }
 </style>
 {% endblock %}
@@ -36,9 +45,9 @@
         <b>{{ cur.fetched_at[:16].replace('T', ' ') }}</b></div>
     </div>
     <div style="display:flex; gap:.5rem; flex-wrap:wrap;">
-      {% if idx > 0 %}<a class="btn btn-outline btn-sm" href="?v={{ versions[idx-1].version }}">← Ältere</a>{% endif %}
-      {% if idx < n - 1 %}<a class="btn btn-outline btn-sm" href="?v={{ versions[idx+1].version }}">Neuere →</a>
-        <a class="btn btn-outline btn-sm" href="{{ url_for('listing_archive', listing_id=listing.id) }}">Neueste</a>{% endif %}
+      {% if idx > 0 %}<a class="btn btn-outline btn-sm" href="?v={{ versions[idx-1].version }}&view={{ view }}">← Ältere</a>{% endif %}
+      {% if idx < n - 1 %}<a class="btn btn-outline btn-sm" href="?v={{ versions[idx+1].version }}&view={{ view }}">Neuere →</a>
+        <a class="btn btn-outline btn-sm" href="{{ url_for('listing_archive', listing_id=listing.id, view=view) }}">Neueste</a>{% endif %}
       <a class="btn btn-outline btn-sm" href="{{ listing.url }}" target="_blank" rel="noopener">Live bei {{ source_name }} ↗</a>
     </div>
   </div>
@@ -46,7 +55,7 @@
   <div class="wb-axis" id="axis">
     {% for v in versions %}
     <a class="wb-tick {{ 'cur' if loop.index0 == idx }}" data-t="{{ v.fetched_at }}"
-       href="?v={{ v.version }}" aria-label="v{{ v.version }}">
+       href="?v={{ v.version }}&view={{ view }}" aria-label="v{{ v.version }}">
       <span class="tip">v{{ v.version }} · {{ v.fetched_at[:16].replace('T', ' ') }}</span>
     </a>
     {% endfor %}
@@ -54,7 +63,18 @@
   <div class="wb-ends"><span>{{ versions[0].fetched_at[:10] }}</span><span>{{ versions[-1].fetched_at[:10] }}</span></div>
 </div>
 
-{% if has_page %}
+{% macro rich(d, plain) -%}
+  {%- if d and d.changed -%}{%- for op, t in d.segs -%}
+    {%- if op == 'eq' -%}{{ t }}{%- else -%}<span class="d-{{ op }}">{{ t }}</span>{%- endif -%}
+  {%- endfor -%}{%- else -%}{{ plain }}{%- endif -%}
+{%- endmacro %}
+
+<div class="wb-tabs">
+  {% if has_page %}<a class="{{ 'on' if view == 'page' }}" href="?v={{ cur.version }}&view=page">Originalansicht</a>{% endif %}
+  <a class="{{ 'on' if view == 'data' }}" href="?v={{ cur.version }}&view=data">Extrahierte Daten &amp; Änderungen</a>
+</div>
+
+{% if view == 'page' %}
 <iframe class="wb-frame" src="{{ url_for('listing_version_page', listing_id=listing.id, version=cur.version) }}"
         sandbox="allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer"
         title="Archivierte Seite v{{ cur.version }}"></iframe>
@@ -62,24 +82,34 @@
   Archivierte Originalseite ohne Skripte.
   <a style="color:var(--muted);" href="{{ url_for('listing_version_html', listing_id=listing.id, version=cur.version) }}" target="_blank">Rohdaten (HTML)</a></p>
 {% else %}
-<div class="card" style="margin-top:1.25rem;">
-  <p class="muted" style="font-size:.8rem; margin-bottom:.8rem;">
-    {% if cur.has_html %}Für diese Quelle wird keine Seite, sondern Rohdaten archiviert – hier die extrahierte Darstellung.
-    {% else %}Zu dieser Version wurde keine Originalseite gespeichert (Anzeige war nur als Suchtreffer bekannt) – hier die extrahierten Daten.{% endif %}</p>
-  <h1>{{ cur.title }}</h1>
-  <div class="muted">{{ cur.location or '—' }}
+<div class="card" style="margin-top:1rem;">
+  <p class="d-note">
+    {% if not prev %}Erste archivierte Version – keine Vergleichsbasis.
+    {% else %}Änderungen gegenüber v{{ prev.version }} ({{ prev.fetched_at[:16].replace('T', ' ') }}):
+      {% set ch = [] %}
+      {% for k, label in [('title','Titel'),('location','Ort'),('price','Preis'),('description','Beschreibung'),('images','Bilder')] %}
+        {% if diff[k].changed %}{% set _ = ch.append(label) %}{% endif %}{% endfor %}
+      {% if ch %}<b>{{ ch|join(', ') }}</b>
+      <span class="d-ins">hinzugefügt</span> <span class="d-del">entfernt</span>{% else %}keine.{% endif %}
+    {% endif %}
+    {% if not cur.has_html %}· Zu dieser Version wurde keine Originalseite gespeichert.
+    {% elif not has_page %}· Für diese Quelle werden Rohdaten statt einer Seite archiviert.{% endif %}</p>
+  <h1>{{ rich(diff and diff.title, cur.title) }}</h1>
+  <div class="muted">{{ rich(diff and diff.location, cur.location or '—') }}
     {% if not listing.active %}· <span class="badge badge-red">verschwunden</span>{% endif %}</div>
-  {% if price %}<div style="font-size:1.4rem; font-weight:700; color:var(--primary); margin-top:.5rem;">{{ price }}</div>{% endif %}
+  {% if price or (diff and diff.price.changed) %}
+  <div style="font-size:1.4rem; font-weight:700; color:var(--primary); margin-top:.5rem;">{{ rich(diff and diff.price, price) }}</div>{% endif %}
   <div class="wb-body">
     <div class="wb-imgs">
-      {% for im in images %}<a href="{{ im.src }}" target="_blank" rel="noopener"><img src="{{ im.src }}" loading="lazy" alt=""></a>
+      {% for im in images %}<a href="{{ im.src }}" target="_blank" rel="noopener"><img class="{{ 'new' if im.new }}" src="{{ im.src }}" loading="lazy" alt=""></a>
       {% else %}<div class="muted">Keine Bilder archiviert.</div>{% endfor %}
+      {% if removed_images %}<div class="d-note">Entfernte Bilder:</div>
+        {% for im in removed_images %}<a href="{{ im.src }}" target="_blank" rel="noopener"><img class="gone" src="{{ im.src }}" loading="lazy" alt=""></a>{% endfor %}{% endif %}
     </div>
     <div>
-      {% if cur.description %}<div class="wb-desc">{{ cur.description }}</div>{% endif %}
-      {% if cur.has_html %}<p style="margin-top:1.25rem;">
-        <a class="btn btn-outline btn-sm" href="{{ url_for('listing_version_html', listing_id=listing.id, version=cur.version) }}"
-           target="_blank">Rohdaten (JSON) ↗</a></p>{% endif %}
+      {% if cur.description or (diff and diff.description.changed) %}
+      <div class="wb-desc">{{ rich(diff and diff.description, cur.description) }}</div>
+      {% else %}<div class="muted">Keine Beschreibung archiviert.</div>{% endif %}
     </div>
   </div>
 </div>
