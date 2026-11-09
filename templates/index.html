@@ -134,7 +134,7 @@
 </details>
 {% endif %}
 
-<div class="summary">
+<div class="summary" id="summary">
   <span><b>{{ trackers|length }}</b> trackers</span>
   <span><b>{{ listing_count }}</b> listings</span>
   <span><b>{{ active_count }}</b> active</span>
@@ -371,6 +371,18 @@ const detailGrid = document.getElementById('detail-grid');
 const detailTitle = document.getElementById('detail-title');
 
 const BASE_TITLE = document.title;
+const summaryEl = document.getElementById('summary');
+const OVERVIEW_SUMMARY = summaryEl.innerHTML;     // global numbers, server-rendered
+
+// The summary bar always describes what is shown: all trackers on the overview,
+// the opened tracker's own listings in its detail view.
+function setSummary(t) {
+  if (!t) { summaryEl.innerHTML = OVERVIEW_SUMMARY; return; }
+  summaryEl.innerHTML =
+    `<span><b>${t.listing_count}</b> listings</span>` +
+    `<span><b>${t.active_count}</b> active</span>` +
+    `<span><b style="color:var(--danger);">${t.gone_count}</b> disappeared</span>`;
+}
 
 // Charts of the detail view are rendered lazily, when their card nears the viewport
 // (a tracker can have thousands of listings).
@@ -413,6 +425,7 @@ function showTracker(id) {
   overview.style.display = 'none';
   detail.style.display = 'block';
   observeCharts(cards);
+  setSummary(t);
   document.title = t.label + ' · ' + BASE_TITLE;
   return true;
 }
@@ -427,6 +440,7 @@ function showOverview() {
   overview.style.display = '';
   detailGrid.innerHTML = '';
   document.title = BASE_TITLE;
+  setSummary(null);
   // charts rendered while hidden need a resize to fill their card
   TRACKERS.forEach(t => { const el = document.getElementById('tchart-' + t.id);
                           if (el && el.data) Plotly.Plots.resize(el); });
