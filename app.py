@@ -341,17 +341,25 @@ def listing_archive(listing_id):
         seen = [p['price_text'] for p in prices if p['observed_at'] < end]
         return seen[-1] if seen else None
 
-    def image_urls(v):
-        return db.get_version_images(listing_id, v['version']) or ([v['image_url']] if v['image_url'] else [])
+    src = sources.get(listing['source'])
 
-    def img(u):
-        return {'url': u, 'src': ('/archive/img/' + archive.local_name(u)) if archive.local_name(u) else u}
+    def image_urls(v):    # {full-size URL: [stored variants]} – one entry per photo
+        urls = db.get_version_images(listing_id, v['version']) or (
+            [v['image_url']] if v['image_url'] else [])
+        photos = {}
+        for u in urls:
+            photos.setdefault(src.full_image_url(u), []).append(u)
+        return photos
+
+    def img(full, variants):    # prefer the archived full-size file, else any archived variant
+        name = next(filter(None, (archive.local_name(u) for u in [full, *variants])), None)
+        return {'url': full, 'src': ('/archive/img/' + name) if name else full}
 
     price = price_at(idx)
     cur_imgs = image_urls(cur)
-    prev_imgs = image_urls(prev) if prev else []
-    images = [dict(img(u), new=bool(prev) and u not in prev_imgs) for u in cur_imgs]
-    removed_images = [img(u) for u in prev_imgs if u not in cur_imgs] if prev else []
+    prev_imgs = image_urls(prev) if prev else {}
+    images = [dict(img(u, vs), new=bool(prev) and u not in prev_imgs) for u, vs in cur_imgs.items()]
+    removed_images = [img(u, vs) for u, vs in prev_imgs.items() if u not in cur_imgs] if prev else []
     diff = None
     if prev:
         diff = {k: _wdiff(o, n) for k, o, n in (

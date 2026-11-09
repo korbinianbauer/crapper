@@ -51,6 +51,11 @@ class Source(ABC):
         """Recognise the URL (listing vs search) from the URL alone, or None if
         it doesn't look like a trackable page on this site."""
 
+    def full_image_url(self, url: str) -> str:
+        """URL of the largest available version of an ad image (previews/thumbnails
+        map to the full-size original). Default: the URL itself."""
+        return url
+
     def fetch_listing(self, url: str) -> ScrapedListing | None:
         """Fetch one listing, or None if removed / unavailable."""
         raise NotImplementedError

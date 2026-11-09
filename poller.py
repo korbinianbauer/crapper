@@ -23,7 +23,23 @@ def _upsert(source, r, seen_at) -> int:
     url = db.listing_needs_image(lid)
     if url and (fname := archive.download_image(url)):
         db.set_image_file(lid, url, fname)
+    archive_full_images(source, [*r.images, r.image_url])
     return lid
+
+
+def archive_full_images(source, urls):
+    """Download every image in its largest available size (never just the preview).
+    Files are keyed by URL and reused, so repeated calls cost nothing."""
+    seen = set()
+    for u in urls:
+        if not u:
+            continue
+        full = source.full_image_url(u)
+        if full in seen:
+            continue
+        seen.add(full)
+        if not archive.download_image(full) and full != u:
+            archive.download_image(u)      # no larger variant available: keep what we have
 
 
 DETAIL_INTERVAL = timedelta(hours=20)    # "at least daily" with slack for poll jitter
@@ -46,8 +62,6 @@ def _archive_full(source, lid: int, url: str, seen_at: str):
     if full is None:
         return
     lid = _upsert(source, full, seen_at)
-    for img in full.images:
-        archive.download_image(img)
     db.mark_detail(lid, seen_at)
 
 
@@ -80,8 +94,6 @@ def _poll_listing_tracker(tracker: dict, source):
         return
 
     lid = _upsert(source, scraped, seen_at)
-    for img in scraped.images:
-        archive.download_image(img)
     db.mark_detail(lid, seen_at)
     db.link_listing(tracker['id'], lid, seen_at)
     db.add_price(lid, seen_at, scraped.price, scraped.price_text)

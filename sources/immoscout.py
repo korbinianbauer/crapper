@@ -67,6 +67,13 @@ class ImmoScoutSource(Source):
     display_name = 'ImmoScout24'
     archive_details = True
 
+    def full_image_url(self, url: str) -> str:
+        # ".../<id>.jpg/ORIG/resize/WxH/format/webp/quality/80" is a downscaled, lossy
+        # re-encode; ".../<id>.jpg/ORIG" is the original upload.
+        if 'pictures.immobilienscout24.de' in url and '/ORIG' in url:
+            return url.split('/ORIG')[0] + '/ORIG'
+        return url
+
     # ── URL recognition ──────────────────────────────────────────────────────
     def matches_url(self, url: str) -> bool:
         return 'immobilienscout24.de' in url

@@ -86,6 +86,13 @@ class KleinanzeigenSource(Source):
         m = _AD_ID_RE.search(url)
         return m.group(1) if m else None
 
+    def full_image_url(self, url: str) -> str:
+        # img.kleinanzeigen.de serves size variants via ?rule=$_N.EXT; $_57 is the largest
+        # (1600x1200, the stored original), $_59 only 960x720, $_1 a 400x300 thumbnail.
+        if urlparse(url).netloc == 'img.kleinanzeigen.de' and 'rule=' in url:
+            return re.sub(r'rule=[^&]*', 'rule=$_57.JPG', url)
+        return url
+
     # ── URL recognition ──────────────────────────────────────────────────────
     def matches_url(self, url: str) -> bool:
         return 'kleinanzeigen.de' in url
