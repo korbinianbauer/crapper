@@ -5,7 +5,7 @@ import json
 import os
 import sqlite3
 import zlib
-from datetime import datetime
+from datetime import datetime, timedelta
 from contextlib import contextmanager
 
 DB_PATH = os.path.join(os.path.dirname(__file__), 'crapper.db')
@@ -122,6 +122,20 @@ def init_db():
                 hash       TEXT NOT NULL,
                 PRIMARY KEY (version_id, url)
             );
+
+            -- One row per search-tracker poll: how many ads were found and how many
+            -- carried a price in the search results (`priced`) or were rescued from
+            -- the ad's detail page (`rescued`). Detects price-extraction outages.
+            CREATE TABLE IF NOT EXISTS poll_stats (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                tracker_id INTEGER NOT NULL
+                               REFERENCES trackers(id) ON DELETE CASCADE,
+                polled_at  TEXT NOT NULL,
+                found      INTEGER NOT NULL,
+                priced     INTEGER NOT NULL,
+                rescued    INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_stats_tracker ON poll_stats(tracker_id, polled_at);
 
             CREATE TABLE IF NOT EXISTS settings (
                 key   TEXT PRIMARY KEY,
@@ -588,7 +602,13 @@ def set_listing_hidden(listing_id: int, hidden: bool):
 
 def add_price(listing_id: int, observed_at: str, price: float | None, price_text: str | None):
     """Append a price observation, skipping consecutive duplicates so the chart
-    stays a clean step function instead of one point per poll."""
+    stays a clean step function instead of one point per poll.
+
+    An observation with neither a price nor a price label means "the scrape did
+    not find a price element" (layout change, partial page) — not "the price was
+    removed" — so it is not stored; the last known price stays valid."""
+    if price is None and not price_text:
+        return
     with get_db() as conn:
         last = conn.execute(
             'SELECT price, price_text FROM price_history WHERE listing_id = ? '
@@ -602,6 +622,45 @@ def add_price(listing_id: int, observed_at: str, price: float | None, price_text
             'VALUES (?, ?, ?, ?)',
             (listing_id, observed_at, price, price_text),
         )
+
+
+PROBLEM_RATIO = 0.5      # below this share of priced ads a poll counts as a price-extraction failure
+PROBLEM_MIN_ADS = 5      # ignore tiny searches
+
+
+def record_poll_stats(tracker_id: int, polled_at: str, found: int, priced: int, rescued: int = 0):
+    with get_db() as conn:
+        conn.execute(
+            'INSERT INTO poll_stats (tracker_id, polled_at, found, priced, rescued) '
+            'VALUES (?, ?, ?, ?, ?)', (tracker_id, polled_at, found, priced, rescued))
+
+
+def get_price_problems() -> dict[int, dict]:
+    """tracker_id → stats of its latest poll, for trackers whose latest poll
+    found few prices in the search results. Only polls from the last 3 days
+    count, so backfilled history never shows up as a current problem."""
+    cutoff = (datetime.utcnow() - timedelta(days=3)).isoformat()
+    with get_db() as conn:
+        rows = conn.execute(
+            'SELECT tracker_id, polled_at, found, priced, rescued FROM poll_stats '
+            'WHERE id IN (SELECT MAX(id) FROM poll_stats GROUP BY tracker_id)').fetchall()
+    return {r[0]: {'polled_at': r[1], 'found': r[2], 'priced': r[3], 'rescued': r[4]}
+            for r in rows
+            if r[1] >= cutoff and r[2] >= PROBLEM_MIN_ADS and r[3] < PROBLEM_RATIO * r[2]}
+
+
+def get_gap_days() -> dict[int, set[str]]:
+    """tracker_id → days (YYYY-MM-DD) on which too few ads had a usable price
+    (search + detail-page rescue), i.e. days without trustworthy price data."""
+    with get_db() as conn:
+        rows = conn.execute(
+            'SELECT tracker_id, substr(polled_at, 1, 10), SUM(found), SUM(priced + rescued) '
+            'FROM poll_stats GROUP BY 1, 2').fetchall()
+    out: dict[int, set[str]] = {}
+    for tid, day, found, ok in rows:
+        if found >= PROBLEM_MIN_ADS and ok < PROBLEM_RATIO * found:
+            out.setdefault(tid, set()).add(day)
+    return out
 
 
 def get_price_history(listing_id: int) -> list[dict]:

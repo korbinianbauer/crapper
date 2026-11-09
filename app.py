@@ -184,7 +184,8 @@ def _median_price(cards: list[dict]) -> float | None:
     return statistics.median(prices) if prices else None
 
 
-def _price_index(items: list[dict], today: date | None = None) -> list[dict]:
+def _price_index(items: list[dict], today: date | None = None,
+                 gap_days: set[str] | None = None) -> list[dict]:
     """Chain-linked daily price index (Jevons / geometric mean), base 100 = 1.0.
 
     `items`: dicts with `history` (`{'t': iso, 'price': float|None}`), `active`
@@ -197,6 +198,7 @@ def _price_index(items: list[dict], today: date | None = None) -> list[dict]:
     up to today; `median` is the median price of the listings alive that day
     (price level, in contrast to the movement-only index)."""
     today = today or date.today()
+    gap_days = gap_days or set()
     series = []                                    # (start, end, [(day, price)])
     for it in items:
         pts = [(date.fromisoformat(h['t'][:10]), h['price'])
@@ -236,7 +238,7 @@ def _price_index(items: list[dict], today: date | None = None) -> list[dict]:
         for (start, end, pts), c in zip(series, caches):
             cur.append(price_on(pts, day, c) if start <= day <= end else None)
         if k == 0:
-            out.append({'t': day.isoformat(), 'index': level, 'median': med(cur)})
+            out.append({'t': day.isoformat(), 'index': level, 'median': None if day.isoformat() in gap_days else med(cur)})
         else:
             logs = []
             for a, b in zip(prev, cur):
@@ -246,7 +248,7 @@ def _price_index(items: list[dict], today: date | None = None) -> list[dict]:
                 logs.append(math.log(r))
             if logs:
                 level *= math.exp(sum(logs) / len(logs))
-            out.append({'t': day.isoformat(), 'index': level, 'median': med(cur)})
+            out.append({'t': day.isoformat(), 'index': level, 'median': None if day.isoformat() in gap_days else med(cur)})
         prev = cur
     return out
 
@@ -291,6 +293,8 @@ def index():
         }
 
     counts = db.get_tracker_listing_counts()
+    problems = db.get_price_problems()
+    gaps = db.get_gap_days()
     tracker_cards = []
     for t in trackers:
         t['listing_count'] = counts.get(t['id'], 0)
@@ -314,7 +318,8 @@ def index():
             'min_price': min(prices) if prices else None,
             'max_price': max(prices) if prices else None,
             'median_price': _median_price(tcards),
-            'trend': _price_index([cards[i] for i in ids]),
+            'price_problem': problems.get(t['id']),
+            'trend': _price_index([cards[i] for i in ids], gap_days=gaps.get(t['id'])),
         })
 
     hidden = [{

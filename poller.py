@@ -52,17 +52,18 @@ def _archive_full(source, lid: int, url: str, seen_at: str):
     by the search, not by this."""
     cutoff = (datetime.utcnow() - DETAIL_INTERVAL).isoformat()
     if not db.needs_detail(lid, cutoff):
-        return
+        return None
     time.sleep(DETAIL_DELAY)
     try:
         full = source.fetch_listing(url)
     except Exception as e:
         logger.warning('Detail fetch failed %s: %s', url, e)
-        return
+        return None
     if full is None:
-        return
+        return None
     lid = _upsert(source, full, seen_at)
     db.mark_detail(lid, seen_at)
+    return full
 
 
 def poll_tracker(tracker: dict):
@@ -109,12 +110,26 @@ def _poll_search_tracker(tracker: dict, source):
         max_pages = 5
 
     results = source.fetch_search(tracker['url'], max_pages=max_pages)
+    priced = rescued = 0
     for r in results:
         lid = _upsert(source, r, seen_at)
         db.link_listing(tracker['id'], lid, seen_at)
-        db.add_price(lid, seen_at, r.price, r.price_text)
-        if source.archive_details:
-            _archive_full(source, lid, r.url, seen_at)
+        has_price = r.price is not None or bool(r.price_text)
+        if has_price:
+            priced += 1
+            db.add_price(lid, seen_at, r.price, r.price_text)
+        # The page is archived either way. If the search card carried no price
+        # (extraction problem), fall back to the price on the ad's own page.
+        full = _archive_full(source, lid, r.url, seen_at) if source.archive_details else None
+        if not has_price and full and (full.price is not None or full.price_text):
+            rescued += 1
+            db.add_price(lid, seen_at, full.price, full.price_text)
+
+    db.record_poll_stats(tracker['id'], seen_at, len(results), priced, rescued)
+    if len(results) >= db.PROBLEM_MIN_ADS and priced < db.PROBLEM_RATIO * len(results):
+        logger.warning('Search tracker %d (%s): only %d of %d ads had a price in the '
+                       'search results (%d rescued from ad pages) — price extraction broken?',
+                       tracker['id'], source.name, priced, len(results), rescued)
 
     # Anything not refreshed this run has dropped out of the search → inactive.
     db.deactivate_missing(tracker['id'], seen_at)
