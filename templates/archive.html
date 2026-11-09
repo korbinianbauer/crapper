@@ -37,6 +37,11 @@
   .fair .lbl { font-size:.72rem; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
   .fair .cheap { color:var(--primary); } .fair .dear { color:var(--danger); }
   .fair details { flex-basis:100%; font-size:.8rem; color:var(--muted); }
+  .fair-feats { display:grid; grid-template-columns:repeat(auto-fill, minmax(17rem, 1fr)); gap:0 2.5rem; margin-top:.6rem; }
+  .fair-feats > div { display:flex; justify-content:space-between; gap:1rem; padding:.18rem 0;
+                      border-bottom:1px solid var(--border); }
+  .fair-feats b { color:var(--text); font-weight:600; text-align:right; }
+  .fair-feats b.unk { color:var(--muted); font-weight:400; }
   .wb-banner { font-size:.8rem; color:var(--muted); }
 </style>
 {% endblock %}
@@ -91,10 +96,9 @@
     Schätzung ohne Kenntnis des eigenen Preises.
     Preise ≙ Angebotspreis, keine Garantie.</div>
   {% if fair.facts %}<details><summary>Bewertete Eigenschaften ({{ fair.facts|length }})</summary>
-    <table style="margin-top:.5rem; border-collapse:collapse; font-size:.8rem; column-width:16rem; display:block; column-count:2;">
-    {% for label, v in fair.facts %}<tr style="display:table; width:100%;"><td style="padding:.1rem 1rem .1rem 0;">{{ label }}</td>
-      <td style="color:{{ 'var(--muted)' if v == 'unbekannt' else 'var(--text)' }};"><b>{{ v }}</b></td></tr>{% endfor %}
-    </table></details>{% endif %}
+    <div class="fair-feats">{% for label, v in fair.facts %}
+      <div><span>{{ label }}</span><b class="{{ 'unk' if v == 'unbekannt' }}">{{ v }}</b></div>{% endfor %}
+    </div></details>{% endif %}
 </div>
 {% endif %}
 
