@@ -90,9 +90,11 @@
     Typische Abweichung ±{{ fair.median_ape }} % (mittlerer Fehler {{ fair.mae|round|int }} €).
     Schätzung ohne Kenntnis des eigenen Preises.
     Preise ≙ Angebotspreis, keine Garantie.</div>
-  {% if fair.facts %}<details><summary>Verwendete Eigenschaften ({{ fair.facts|length }})</summary>
-    {% for label, v in fair.facts %}{{ label }}{% if v is not sameas true %}: <b>{{ v }}</b>{% endif %}{% if not loop.last %} · {% endif %}{% endfor %}
-  </details>{% endif %}
+  {% if fair.facts %}<details><summary>Bewertete Eigenschaften ({{ fair.facts|length }})</summary>
+    <table style="margin-top:.5rem; border-collapse:collapse; font-size:.8rem; column-width:16rem; display:block; column-count:2;">
+    {% for label, v in fair.facts %}<tr style="display:table; width:100%;"><td style="padding:.1rem 1rem .1rem 0;">{{ label }}</td>
+      <td style="color:{{ 'var(--muted)' if v == 'unbekannt' else 'var(--text)' }};"><b>{{ v }}</b></td></tr>{% endfor %}
+    </table></details>{% endif %}
 </div>
 {% endif %}
 

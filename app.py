@@ -442,9 +442,14 @@ def listing_archive(listing_id):
         fair['mae'] = m['candidates'][m['chosen']]['mae']
         fair['median_ape'] = round(m['candidates'][m['chosen']]['median_ape'] * 100)
         feats = {f['key']: f for f in fair['definition']['features']}
-        fair['facts'] = [(feats[k]['label'], int(v) if isinstance(v, float) and v.is_integer() else v)
-                         for k, v in fair['features'].items()
-                         if k in feats and v not in (None, False)]
+        def show(f, v):
+            if v is None:
+                return 'unbekannt'
+            if f['type'] == 'bool':
+                return 'Ja' if v else 'Nein'
+            return int(v) if isinstance(v, float) and v.is_integer() else v
+        fair['facts'] = [(f['label'], show(f, fair['features'].get(f['key'])))
+                         for f in fair['definition']['features']]
     source_names = {s.name: s.display_name for s in sources.all_sources()}
     raw = db.get_version_html(listing_id, cur['version']) if cur['has_html'] else None
     has_page = bool(raw) and not raw.lstrip().startswith('{')   # ImmoScout archives JSON, not a page
