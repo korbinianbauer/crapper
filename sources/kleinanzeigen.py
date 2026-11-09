@@ -86,7 +86,7 @@ _CATEGORY_NAMES = {
     'unentgeltlich-zu-verschenken': 'Zu verschenken', 'verschenken-tauschen':
     'Verschenken & Tauschen', 'fahrzeuge': 'Fahrzeuge',
 }
-_CODE_RE = re.compile(r'^k0(?:c(\d+))?(?:l(\d+))?(?:r(\d+))?(?P<attrs>\+.*)?$')
+_CODE_RE = re.compile(r'^(?:k0|(?=c\d))(?:c(\d+))?(?:l(\d+))?(?:r(\d+))?(?P<attrs>\+.*)?$')
 _H1_COUNT_RE = re.compile(r'^\d[\d.]*\s*-\s*\d[\d.]*\s+von\s+[\d.]+\s+')
 
 
@@ -134,6 +134,9 @@ def search_label(url: str, h1: str | None = None) -> str:
             if k == 'preis':
                 if f := _price_filter(v):
                     flt.append(f)
+            elif k == 'anzeige':
+                if v != 'angebote':               # offers are the default, not worth showing
+                    flt.append(_pretty(v))
             elif k == 'versand':
                 flt.append('mit Versand' if v == 'ja' else 'ohne Versand')
             else:
@@ -152,7 +155,10 @@ def search_label(url: str, h1: str | None = None) -> str:
     category = _CATEGORY_NAMES.get(names[0], _pretty(names[0])) if cat_id and names else None
     if kw is None and not h1:
         # offline: the keyword slug is the last name segment (after category [/ place])
-        extra = names[(1 if cat_id else 0) + (1 if has_loc else 0):]
+        extra = names[(1 if cat_id else 0):]
+        if has_loc and extra:
+            place = place or _pretty(extra[0])    # city slug
+            extra = extra[1:]
         if extra:
             kw = extra[-1].replace('-', ' ')
 
