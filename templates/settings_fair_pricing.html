@@ -113,9 +113,14 @@
         </form>
         <div class="hint">Mietangebote werden immer als <b>Warmmiete inkl. Heizung, Strom, Internet, Wasser, Müllabfuhr und
           einem PKW-Stellplatz</b> verglichen. Je Anzeige ist hinterlegt, welche dieser Posten im Preis stehen und welche nicht;
-          fehlende Posten werden mit diesen Beträgen aufgeschlagen (ein extra ausgewiesener Stellplatzpreis ersetzt den
-          Pauschalbetrag). Das Modell wird auf dieser normierten Miete trainiert und jedes Modell merkt sich die Annahmen,
-          mit denen es trainiert wurde – Änderungen wirken daher ab dem <b>nächsten Training</b>.</div>
+          fehlende Posten werden aufgeschlagen (ein extra ausgewiesener Stellplatzpreis ersetzt den Pauschalbetrag).
+          <b>Heizkosten</b> berechnet das Modell aus dem Energiebedarf (kWh/m² laut Anzeige, sonst vom ML-Modell aus Energieklasse,
+          Baujahr und Energieträger geschätzt) × Wohnfläche × dem hier eingestellten Energiepreis; <b>Nebenkosten unbekannter Höhe</b>
+          werden vom ML-Modell geschätzt (Betriebskosten) plus Heizung. Das Modell wird auf der normierten Miete trainiert und
+          merkt sich Annahmen und Teilmodelle – Änderungen wirken daher ab dem <b>nächsten Training</b>.
+          {% if fs.cost_models %}<br>Teilmodelle des aktiven Modells:
+          Heizenergie {% if fs.cost_models.kwh %}{{ fs.cost_models.kwh.n }} Anzeigen mit kWh-Angabe, Ø-Fehler {{ fs.cost_models.kwh.mae|round|int }} kWh/m²{% else %}zu wenige Daten (Energieklasse-Richtwerte){% endif %};
+          Betriebskosten {% if fs.cost_models.nk %}{{ fs.cost_models.nk.n }} Anzeigen, Ø-Fehler {{ fs.cost_models.nk.mae|round|int }} €/Monat{% else %}zu wenige Daten{% endif %}.{% endif %}</div>
       </section>
       {% endif %}
 

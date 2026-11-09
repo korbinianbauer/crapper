@@ -695,7 +695,7 @@ def get_fair_price_map() -> dict[int, dict]:
                 continue
             factor = 1 + _fair_offset(conn, fs['id']) / 100
             for r in conn.execute('''
-                    SELECT fp.listing_id, fp.fair_price, lf.data, m.metrics
+                    SELECT fp.listing_id, fp.fair_price, lf.data, m.metrics, m.id AS model_id
                     FROM fair_prices fp
                     JOIN ml_models m ON m.id = fp.model_id
                     LEFT JOIN listing_features lf ON lf.listing_id = fp.listing_id
@@ -706,6 +706,7 @@ def get_fair_price_map() -> dict[int, dict]:
                 out[r['listing_id']] = {'fair_price': r['fair_price'] * factor, 'raw': r['fair_price'],
                                         'features': {k: v for k, v in data.items() if not k.startswith('_')},
                                         'cost': data.get('_cost'), 'assume': met.get('cost_assumptions'),
+                                        'model_id': r['model_id'],
                                         'per': met.get('per'), 'per_range': met.get('per_range')}
     return out
 

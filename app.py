@@ -283,7 +283,8 @@ def index(tracker_id):
         if fair:
             fair_price = round(fair['fair_price'])
             # rents are compared as normalised Warmmiete (incl. Heizung, Strom, Internet, … see ml.effective_price)
-            eff = ml.effective_price(price_num, fair.get('cost'), fair['features'], fair.get('assume'))
+            eff = ml.effective_price(price_num, fair.get('cost'), fair['features'], fair.get('assume'),
+                                     ml.cost_models_for(fair.get('model_id')))
             if eff is not None and price_num and eff != price_num:
                 eff_price = round(eff)
             if price_num and ml.is_plausible(price_num, fair['features'], fair['per'], fair.get('per_range')):
@@ -453,7 +454,8 @@ def listing_archive(listing_id):
         fair['current'] = cur_price
         fair['plausible'] = ml.is_plausible(cur_price, fair['features'], fair['metrics'].get('per'), fair['metrics'].get('per_range'))
         fair['eff'], fair['eff_parts'] = ml.effective_breakdown(cur_price, fair.get('cost'), fair['features'],
-                                                               fair['metrics'].get('cost_assumptions'))
+                                                               fair['metrics'].get('cost_assumptions'),
+                                                               ml.cost_models_for(fair['model_id']))
         if not fair['eff_parts']:
             fair['eff'] = None
         base = fair['eff'] or cur_price
@@ -691,7 +693,8 @@ def _fair_stats(fs: dict, fair_map: dict) -> dict:
     for r in db.get_training_rows(fs['id']):
         f = fair_map.get(r['listing_id'])
         if f and r['price'] and ml.is_plausible(r['price'], r['features'], m0.get('per'), m0.get('per_range')):
-            ratios.append(ml.effective_price(r['price'], r.get('cost'), r['features'], f.get('assume')) / f['raw'])
+            ratios.append(ml.effective_price(r['price'], r.get('cost'), r['features'], f.get('assume'),
+                                             ml.cost_models_for(f.get('model_id'))) / f['raw'])
     if not ratios:
         return {}
     return {'n': len(ratios), 'median_pct': round((statistics.median(ratios) - 1) * 100, 1)}
@@ -707,6 +710,8 @@ def settings_fair_pricing():
         fs['stats'] = _fair_stats(fs, fair_map)
         fs['has_costs'] = any(r.get('cost') for r in db.get_training_rows(fs['id']))
         fs['costs'] = db.get_cost_assumptions(fs['id'])
+        act = next((m for m in fs['models'] if m['id'] == fs['active_model_id']), None)
+        fs['cost_models'] = (act['metrics'].get('cost_models') if act else None) or {}
         for m in fs['models']:
             c = m['metrics']['candidates'][m['metrics']['chosen']]
             m['mae'], m['median_ape'], m['r2'] = round(c['mae']), round(c['median_ape'] * 100, 1), c['r2']
@@ -770,9 +775,11 @@ def settings_select_model(fs_id):
     return redirect(url_for('settings_fair_pricing'))
 
 
-COST_FIELDS = [('strom', 'Strom (€/Monat)'), ('internet', 'Internet (€/Monat)'), ('stellplatz', 'PKW-Stellplatz (€/Monat)'),
-               ('wasser', 'Wasser (€/Monat)'), ('muell', 'Müllabfuhr (€/Monat)'),
-               ('heizung_m2', 'Heizung, falls nicht enthalten (€/m²)'), ('nk_m2', 'Nebenkosten bei unbekannter Höhe (€/m²)')]
+COST_FIELDS = [('strom_kwh', 'Strom (€/kWh)'), ('strom_verbrauch', 'Stromverbrauch (kWh/Jahr)'),
+               ('gas_kwh', 'Erdgas (€/kWh)'), ('oel_l', 'Heizöl (€/Liter)'), ('fernwaerme_kwh', 'Fernwärme (€/kWh)'),
+               ('pellets_kg', 'Holzpellets (€/kg)'), ('holz_rm', 'Scheitholz (€/Raummeter)'),
+               ('internet', 'Internet (€/Monat)'), ('stellplatz', 'PKW-Stellplatz (€/Monat)'),
+               ('wasser', 'Wasser (€/Monat)'), ('muell', 'Müllabfuhr (€/Monat)')]
 
 
 @app.route('/settings/fair-pricing/<int:fs_id>/costs', methods=['POST'])
@@ -787,8 +794,8 @@ def settings_set_costs(fs_id):
             v = float(request.form.get(key, '').strip().replace(',', '.'))
         except ValueError:
             v = math.nan
-        if not math.isfinite(v) or not 0 <= v <= 1000:
-            flash('Alle Kostenannahmen müssen Zahlen zwischen 0 und 1000 sein.', 'error')
+        if not math.isfinite(v) or not 0 <= v <= 100000:
+            flash('Alle Kostenannahmen müssen Zahlen zwischen 0 und 100000 sein.', 'error')
             return redirect(url_for('settings_fair_pricing'))
         vals[key] = round(v, 2)
     db.set_cost_assumptions(fs_id, vals)

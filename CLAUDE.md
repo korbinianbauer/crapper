@@ -155,9 +155,13 @@ price and the ML rating (`fair_delta` = asking price vs. fair price in %, negati
   estimated by the agent from the town.
 - **Normalised rent (`_cost`)**: for rent feature sets the agent also stores, per listing, next to the features
   `data["_cost"] = {basis: "kalt"|"warm", add: €NK+Heizung on top of the price (null = unknown), incl: [strom|internet|stellplatz]
-  contained in the price, extra: [heizung|wasser|muell] NOT contained, sp: separate parking price}`. Listings are always
+  contained in the price, extra: [heizung|wasser|muell] NOT contained, sp: separate parking price,
+  heat: {carrier: gas|oel|fernwaerme|strom|waermepumpe|pellets|holz|null, kwh: Endenergie kWh/(m²·a) from the ad|null}}`. Listings are always
   compared as **Warmmiete incl. Heizung, Strom, Internet, Wasser, Müll, 1 PKW-Stellplatz**: `ml.effective_price` adds the
-  missing items with the assumptions from the settings page (`fair_cost_<fs_id>`, defaults in `ml.DEFAULT_COSTS`). The model is
+  missing items. Heating = kWh/m² (from the ad, else an ML sub-model on Energieklasse/Baujahr/Energieträger) × m² × energy price;
+  unknown Nebenkosten = ML-estimated Betriebskosten (sub-model) + Heizung; Strom = Verbrauch × Preis. Energy prices are entered
+  per billing unit (€/kWh, €/Liter, €/kg, €/Raummeter) on the settings page (`fair_cost_<fs_id>`, defaults in `ml.DEFAULT_COSTS`).
+  The two sub-models are trained with each price model (`ml.fit_cost_models`) and stored in its artifact (`cost_models`). The model is
   trained on that normalised price, stores the assumptions in its metrics, and ratings (`fair_delta`, archive) use the same
   assumptions — so changed assumptions only apply from the next training. Sale feature sets have no `_cost`.
 - **Fair-price settings** (`/settings/fair-pricing`, keys in `settings`): `fair_model_<feature_set_id>` =
