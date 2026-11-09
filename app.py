@@ -399,6 +399,33 @@ def listing_versions(listing_id):
     return jsonify(db.get_versions(listing_id))
 
 
+@app.route('/listing/<int:listing_id>/images')
+def listing_images(listing_id):
+    """Photos of the newest archived version for the card gallery (archived file if we have it)."""
+    listing = db.get_listing(listing_id)
+    if not listing:
+        abort(404)
+    src = sources.get(listing['source'])
+    for v in db.get_versions(listing_id):                       # newest first
+        urls = db.get_version_images(listing_id, v['version']) or ([v['image_url']] if v['image_url'] else [])
+        if urls:
+            break
+    else:
+        urls = []
+    photos = {}
+    for u in urls:
+        if 'logo-kleinanzeigen' in u:            # site placeholder, not a photo
+            continue
+        photos.setdefault(src.full_image_url(u), []).append(u)
+    out = []
+    for full, variants in photos.items():
+        name = next(filter(None, (archive.local_name(u) for u in [full, *variants])), None)
+        out.append('/archive/img/' + name if name else full)
+    resp = jsonify(out)
+    resp.headers['Cache-Control'] = 'public, max-age=300'
+    return resp
+
+
 @app.route('/listing/<int:listing_id>/archive')
 def listing_archive(listing_id):
     """Wayback-style view: newest archived version by default, timeline of all versions."""
@@ -478,7 +505,7 @@ def listing_archive(listing_id):
     view = request.args.get('view')
     if view not in ('page', 'data') or (view == 'page' and not has_page):
         view = 'page' if has_page else 'data'
-    return render_template('archive.html', listing=listing, versions=versions, cur=cur, prev=prev,
+    return render_template('archive.html', price_hist=[{'t': p['observed_at'], 'price': p['price'], 'label': p['price_text']} for p in prices], listing=listing, versions=versions, cur=cur, prev=prev,
                            idx=idx, images=images, removed_images=removed_images, diff=diff,
                            price=price, has_page=has_page, view=view, fair=fair,
                            source_name=source_names.get(listing['source'], listing['source']))

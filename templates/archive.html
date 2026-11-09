@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Archiv · {{ cur.title }}{% endblock %}
 {% block head %}
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
 <style>
   .wb-bar { padding: 1rem 1.25rem 1.6rem; }
   .wb-top { display:flex; flex-wrap:wrap; gap:.6rem 1rem; align-items:center; justify-content:space-between; margin-bottom:1.1rem; }
@@ -79,6 +80,10 @@
   {%- endfor -%}{%- else -%}{{ plain }}{%- endif -%}
 {%- endmacro %}
 
+<div class="card" style="margin-top:1.25rem; padding:.9rem 1.25rem;">
+  <div class="muted" style="font-size:.72rem; text-transform:uppercase; letter-spacing:.04em;">Preisverlauf</div>
+  <div id="price-chart" style="width:100%; height:170px;"></div>
+</div>
 {% if fair %}
 <div class="card fair">
   <div><div class="lbl">Fairer Preis (ML)</div><div class="big">{{ '{:,.0f}'.format(fair.fair_price).replace(',', '.') }} €</div></div>
@@ -153,6 +158,25 @@
 {% endblock %}
 {% block scripts %}
 <script>
+// Price history of this listing (step line; the version axis above is time-proportional as well).
+(function () {
+  const el = document.getElementById('price-chart');
+  const pts = {{ price_hist|tojson }}.filter(p => p.price !== null);
+  if (!el) return;
+  if (!pts.length) { el.innerHTML = '<div style="color:#94a3b8;font-size:.8rem;padding:1.2rem 0;">Kein Preisverlauf (kein numerischer Preis)</div>'; return; }
+  const d = iso => new Date(iso.endsWith('Z') ? iso : iso + 'Z');
+  const xs = pts.map(p => d(p.t)), ys = pts.map(p => p.price);
+  if (pts.length === 1) { xs.push(new Date()); ys.push(ys[0]); }
+  const pad = Math.max((Math.max(...ys) - Math.min(...ys)) * 0.15, Math.max(...ys) * 0.03);
+  Plotly.newPlot(el, [{x: xs, y: ys, type: 'scatter', mode: 'lines+markers',
+    line: {color: '#22c55e', width: 2, shape: 'hv'}, marker: {size: 6, color: '#22c55e'},
+    hovertemplate: '%{y:,.0f} €<br>%{x|%d.%m.%Y}<extra></extra>'}],
+    {margin: {l: 56, r: 10, t: 6, b: 24}, paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+     font: {color: '#94a3b8', size: 10}, showlegend: false, xaxis: {showgrid: false},
+     yaxis: {gridcolor: '#334155', tickformat: ',.0f', ticksuffix: ' €', range: [Math.min(...ys) - pad, Math.max(...ys) + pad]}},
+    {displayModeBar: false, responsive: true});
+})();
+
 // Place ticks proportionally to time (like the Wayback Machine); fall back to even spacing.
 (function () {
   const ticks = [...document.querySelectorAll('#axis .wb-tick')];

@@ -27,8 +27,20 @@
   .listing { display:flex; flex-direction:column; gap:.6rem; border:1px solid var(--border); }
   .listing.gone { border:2px solid var(--danger); }
   .listing .head { display:flex; gap:.75rem; }
-  .listing img.thumb { width:84px; height:84px; object-fit:cover; border-radius:8px;
-                       background:var(--surface-2); flex-shrink:0; }
+  .gallery { position:relative; width:100%; aspect-ratio:4/3; border-radius:10px; overflow:hidden;
+             background:var(--surface-2); margin:-.1rem 0 0; }
+  .gallery img { width:100%; height:100%; object-fit:cover; display:block; }
+  .gallery .noimg { width:100%; height:100%; display:flex; align-items:center; justify-content:center;
+                    color:var(--muted); font-size:.8rem; }
+  .gallery .nav { position:absolute; top:50%; transform:translateY(-50%); width:2.2rem; height:2.6rem; border:none;
+                  cursor:pointer; background:rgba(15,23,42,.55); color:#fff; font-size:1.3rem; line-height:1;
+                  opacity:0; transition:opacity .15s; }
+  .gallery:hover .nav, .gallery .nav:focus-visible { opacity:1; }
+  @media (hover:none) { .gallery .nav { opacity:.85; } }
+  .gallery .nav.prev { left:0; border-radius:0 8px 8px 0; } .gallery .nav.next { right:0; border-radius:8px 0 0 8px; }
+  .gallery .count { pointer-events:none; position:absolute; right:.5rem; bottom:.4rem; padding:.1rem .45rem; border-radius:20px;
+                    background:rgba(15,23,42,.65); color:#fff; font-size:.7rem; }
+  .gallery a.open { position:absolute; inset:0; }
   .listing .title { font-weight:600; font-size:.95rem; line-height:1.25; }
   .listing .title a { color:var(--text); text-decoration:none; }
   .listing .title a:hover { color:var(--primary); }
@@ -36,7 +48,7 @@
   .listing .price { font-size:1.25rem; font-weight:700; color:var(--primary); }
   .listing.gone .price { color:var(--muted); }
   .listing .row { display:flex; align-items:center; justify-content:space-between; gap:.5rem; }
-  .listing .chart { width:100%; height:140px; }
+  .listing .chart { width:100%; height:78px; }
   .listing .tracker-tag { font-size:.7rem; color:var(--muted); }
   .actions { display:flex; gap:.4rem; }
 
@@ -368,16 +380,42 @@ function ratingHtml(c) {
   // rents are rated on the normalised Warmmiete (incl. Heizung, Strom, Internet, Wasser, Müll, Stellplatz) — show it
   if (c.eff_price) {
     const tip = 'Normierte Warmmiete inkl. Heizung, Strom, Internet, Wasser, Müllabfuhr und 1 PKW-Stellplatz (Details im Archiv)';
-    return `<div class="rating" title="${tip}"><b class="${cls}">${txt}</b> · normiert ${c.eff_price.toLocaleString('de-DE')} € vs. fair ${fair}</div>`;
+    return `<div class="rating" title="${tip}"><b class="${cls}">${txt}</b> · normierte Warmmiete ${c.eff_price.toLocaleString('de-DE')} € vs. fair ${fair}</div>`;
   }
   return `<div class="rating"><b class="${cls}">${txt}</b> · Fairer Preis ${fair}</div>`;
 }
 
+// Gallery on the cards: photos are fetched once per listing (/listing/<id>/images), then browsed in place.
+const GALLERY = {};
+function galleryStep(id, dir) {
+  const el = document.querySelector(`.gallery[data-id="${id}"]`);
+  if (!el) return;
+  const show = () => {
+    const list = GALLERY[id] || [];
+    if (!list.length) return;
+    const i = (Number(el.dataset.i) + dir + list.length) % list.length;
+    el.dataset.i = i;
+    let img = el.querySelector('img');
+    if (!img) { el.querySelector('.noimg')?.remove(); img = document.createElement('img'); el.prepend(img); }
+    img.src = list[i];
+    const cnt = el.querySelector('.count');
+    cnt.textContent = (i + 1) + ' / ' + list.length; cnt.style.display = '';
+    const nxt = new Image(); nxt.src = list[(i + 1) % list.length];      // preload next
+  };
+  if (GALLERY[id]) return show();
+  fetch(`/listing/${id}/images`).then(r => r.json()).then(l => { GALLERY[id] = l; show(); }).catch(() => {});
+}
+
 function listingCardHtml(c) {
   const imgSrc = c.image_file ? '/archive/img/' + c.image_file : c.image_url;
-  const thumb = imgSrc
-    ? `<img class="thumb" src="${esc(imgSrc)}" loading="lazy" alt="">`
-    : '<div class="thumb"></div>';
+  // large preview with gallery arrows (the photo list is loaded on first use, see galleryStep)
+  const thumb = `<div class="gallery" data-id="${c.id}" data-i="0">
+      ${imgSrc ? `<img src="${esc(imgSrc)}" loading="lazy" alt="">` : '<div class="noimg">kein Bild</div>'}
+      <a class="open" href="/listing/${c.id}/archive" aria-label="Anzeige öffnen"></a>
+      <button class="nav prev" type="button" aria-label="Vorheriges Bild" onclick="galleryStep(${c.id}, -1)">‹</button>
+      <button class="nav next" type="button" aria-label="Nächstes Bild" onclick="galleryStep(${c.id}, 1)">›</button>
+      <span class="count" style="display:none;"></span>
+    </div>`;
   const badge = c.active
     ? '<span class="badge badge-green">aktiv</span>'
     : '<span class="badge badge-red">verschwunden</span>';
@@ -391,8 +429,8 @@ function listingCardHtml(c) {
     </form>` : '';
   return `
   <div class="listing card ${c.active ? '' : 'gone'}" data-id="${c.id}">
+    ${thumb}
     <div class="head">
-      ${thumb}
       <div style="flex:1; min-width:0;">
         <div class="title"><a href="/listing/${c.id}/archive">${esc(c.title)}</a></div>
         <div class="meta">${esc(c.location) || '—'}</div>
