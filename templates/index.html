@@ -140,6 +140,16 @@
   <span><b style="color:var(--danger);">{{ gone_count }}</b> disappeared</span>
 </div>
 
+{% if global_trend %}
+<div class="card" style="padding:.8rem 1rem; margin-bottom:1rem;">
+  <div style="font-weight:600;">Preisindex (alle Anzeigen)
+    <span class="muted" style="font-weight:400; font-size:.8rem;">
+      aktuell {{ '%.1f'|format(global_trend[-1].index * 100) }} · Start = 100, verkettet, ohne Neuzugangs-Sprünge</span>
+    {% if global_median is not none %}<span style="float:right; font-weight:400; font-size:.85rem;" title="Median der aktuellen Preise aktiver Anzeigen (Preisniveau)">Median aktiv <b>{{ '%.0f'|format(global_median) }} €</b></span>{% endif %}</div>
+  <div class="chart" id="global-index"></div>
+</div>
+{% endif %}
+
 {% if not tracker_cards %}
 <div class="card" style="text-align:center; padding:3rem;">
   <p class="muted">No trackers yet.{% if session.logged_in %} Add a listing URL or a search above.{% endif %}</p>
@@ -162,6 +172,7 @@
       <span><b>{{ t.listing_count }}</b> Anzeigen</span>
       <span><b style="color:var(--success,#22c55e);">{{ t.active_count }}</b> aktiv</span>
       {% if t.gone_count %}<span><b style="color:var(--danger);">{{ t.gone_count }}</b> weg</span>{% endif %}
+      {% if t.median_price is not none %}<span title="Median der aktiven Anzeigen">Median <b>{{ '%.0f'|format(t.median_price) }} €</b></span>{% endif %}
       {% if t.avg_price is not none %}<span>Ø <b>{{ '%.0f'|format(t.avg_price) }} €</b></span>{% endif %}
       {% if t.min_price is not none %}<span><b>{{ '%.0f'|format(t.min_price) }}</b>–<b>{{ '%.0f'|format(t.max_price) }} €</b></span>{% endif %}
     </div>
@@ -210,6 +221,7 @@
 {% block scripts %}
 <script>
 const CARDS = {{ cards|tojson }};            // {listing_id: card}
+const GLOBAL_TREND = {{ global_trend|tojson }};
 const TRACKERS = {{ tracker_cards|tojson }}; // overview cards
 const REFRESHING = {{ refreshing|tojson }};
 const CSRF = '{{ csrf_token() }}';
@@ -271,17 +283,15 @@ function renderListingChart(c) {
   }), CHART_CFG);
 }
 
-// Tracker's average normalised price trend (100 % = each listing's first price).
-function renderTrackerChart(t) {
-  const el = document.getElementById('tchart-' + t.id);
+// Chain-linked price index (100 = start of tracking), daily points up to today.
+function renderIndexChart(el, trend, big) {
   if (!el) return;
-  const trend = t.trend || [];
-  if (trend.length === 0) {
+  if (!trend || trend.length === 0) {
     el.innerHTML = '<div style="color:#94a3b8;font-size:.78rem;padding:1.4rem 0;text-align:center;">' +
                    'Kein gemeinsamer Preisverlauf</div>';
     return;
   }
-  const xs = trend.map(p => fmtDate(p.t));
+  const xs = trend.map(p => new Date(p.t + 'T00:00:00'));
   const ys = trend.map(p => p.index * 100);
   if (trend.length === 1) { xs.push(new Date()); ys.push(ys[0]); }
   const up = ys[ys.length - 1] >= 100;
@@ -289,13 +299,17 @@ function renderTrackerChart(t) {
   Plotly.newPlot(el, [{
     x: xs, y: ys, type: 'scatter', mode: 'lines',
     line: {color: color, width: 2, shape: 'hv'},
-    hovertemplate: 'Ø %{y:.1f} %<br>%{x|%d.%m.%Y}<extra></extra>',
+    hovertemplate: 'Index %{y:.1f}<br>%{x|%d.%m.%Y}<extra></extra>',
   }], Object.assign({}, CHART_LAYOUT, {
     yaxis: {gridcolor: '#334155', ticksuffix: ' %', zeroline: false},
     shapes: [{type: 'line', xref: 'paper', x0: 0, x1: 1, y0: 100, y1: 100,
               line: {color: '#475569', width: 1, dash: 'dot'}}],
   }), CHART_CFG);
 }
+function renderTrackerChart(t) {
+  renderIndexChart(document.getElementById('tchart-' + t.id), t.trend);
+}
+renderIndexChart(document.getElementById('global-index'), GLOBAL_TREND);
 
 TRACKERS.forEach(renderTrackerChart);
 

@@ -2,13 +2,16 @@ import difflib
 import hmac
 import re
 import logging
+import math
 import os
 import secrets
+import statistics
 import subprocess
 import sys
 import threading
 import time
 from collections import defaultdict
+from datetime import date, timedelta
 from functools import wraps
 
 from bs4 import BeautifulSoup
@@ -168,40 +171,75 @@ def _refresh_async(tracker_id: int):
 
 # ── index ───────────────────────────────────────────────────────────────────────
 
-def _avg_price_trend(histories: list[list[dict]]) -> list[dict]:
-    """Average normalised price trend across several listings.
+MIN_INDEX_PRICE = 5.0       # ignore placeholder prices (1 €, 0 €) in the index
+MAX_DAILY_MOVE = 2.0        # clamp a single listing's daily ratio to [1/2, 2]
 
-    Each listing's numeric prices are normalised to its first observation
-    (index 1.0 = 100 %), then forward-filled and averaged across all listings
-    that have started, at every distinct observation timestamp. Returns a list
-    of `{'t': iso, 'index': float}` (1.0 == baseline)."""
-    series: list[list[tuple[str, float]]] = []
-    for hist in histories:
-        pts = [(h['t'], h['price']) for h in hist if h['price'] is not None]
+
+def _median_price(cards: list[dict]) -> float | None:
+    """Median current numeric price of the *active* listings (price level, as
+    opposed to the chain-linked index which measures price movement)."""
+    prices = [c['current_price_num'] for c in cards
+              if c['active'] and c['current_price_num'] is not None
+              and c['current_price_num'] >= MIN_INDEX_PRICE]
+    return statistics.median(prices) if prices else None
+
+
+def _price_index(items: list[dict], today: date | None = None) -> list[dict]:
+    """Chain-linked daily price index (Jevons / geometric mean), base 100 = 1.0.
+
+    `items`: dicts with `history` (`{'t': iso, 'price': float|None}`), `active`
+    and `last_seen`. Per day the index moves by the geometric mean of the
+    day-over-day price ratios of the listings that had a numeric price on both
+    days, so new listings enter without causing a jump and vanished ones simply
+    drop out (a listing counts until the day it was last seen). Prices are
+    forward-filled between observations (history only stores changes).
+    Returns `[{'t': 'YYYY-MM-DD', 'index': float}]`, extended up to today."""
+    today = today or date.today()
+    series = []                                    # (start, end, [(day, price)])
+    for it in items:
+        pts = [(date.fromisoformat(h['t'][:10]), h['price'])
+               for h in it['history'] if h['price'] is not None]
         if not pts:
             continue
-        base = pts[0][1]
-        if not base:
-            continue
-        series.append([(t, p / base) for t, p in pts])
+        end = today if it.get('active', True) else \
+            min(today, date.fromisoformat((it.get('last_seen') or '')[:10] or today.isoformat()))
+        start = pts[0][0]
+        if end < start:
+            end = start
+        series.append((start, end, pts))
     if not series:
         return []
 
-    times = sorted({t for s in series for t, _ in s})
-    out: list[dict] = []
-    for t in times:
-        vals = []
-        for s in series:
-            cur = None
-            for st, sv in s:
-                if st <= t:
-                    cur = sv
-                else:
-                    break
-            if cur is not None:        # only count listings that have started
-                vals.append(cur)
-        if vals:
-            out.append({'t': t, 'index': sum(vals) / len(vals)})
+    first = min(s[0] for s in series)
+    days = [first + timedelta(d) for d in range((today - first).days + 1)]
+
+    def price_on(pts, day, cache):
+        # pts are chronological; last observation on/before `day`
+        i = cache[0]
+        while i + 1 < len(pts) and pts[i + 1][0] <= day:
+            i += 1
+        cache[0] = i
+        return pts[i][1]
+
+    caches = [[0] for _ in series]
+    prev: list[float | None] = [None] * len(series)
+    level = 1.0
+    out = [{'t': first.isoformat(), 'index': level}]
+    for k, day in enumerate(days):
+        cur: list[float | None] = []
+        for (start, end, pts), c in zip(series, caches):
+            cur.append(price_on(pts, day, c) if start <= day <= end else None)
+        if k > 0:
+            logs = []
+            for a, b in zip(prev, cur):
+                if a is None or b is None or a < MIN_INDEX_PRICE or b < MIN_INDEX_PRICE:
+                    continue
+                r = min(max(b / a, 1 / MAX_DAILY_MOVE), MAX_DAILY_MOVE)
+                logs.append(math.log(r))
+            if logs:
+                level *= math.exp(sum(logs) / len(logs))
+            out.append({'t': day.isoformat(), 'index': level})
+        prev = cur
     return out
 
 
@@ -267,7 +305,8 @@ def index():
             'avg_price': sum(prices) / len(prices) if prices else None,
             'min_price': min(prices) if prices else None,
             'max_price': max(prices) if prices else None,
-            'trend': _avg_price_trend([cards[i]['history'] for i in ids]),
+            'median_price': _median_price(tcards),
+            'trend': _price_index([cards[i] for i in ids]),
         })
 
     hidden = [{
@@ -288,6 +327,8 @@ def index():
         active_count=sum(1 for c in cards.values() if c['active']),
         gone_count=sum(1 for c in cards.values() if not c['active']),
         refreshing=list(_active_refreshes),
+        global_trend=_price_index(list(cards.values())),
+        global_median=_median_price(list(cards.values())),
     )
 
 
