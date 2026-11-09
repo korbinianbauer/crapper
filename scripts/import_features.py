@@ -14,3 +14,10 @@ fid = db.upsert_feature_set(fs['name'], fs.get('tracker_id'),
                             {'features': fs['features'], 'target': fs.get('target', 'price')})
 n = db.save_listing_features(fid, {int(k): v for k, v in d['rows'].items()})
 print(f'feature set {fs["name"]} (id {fid}): stored features for {n}/{len(d["rows"])} listings')
+
+import ml
+ids = [int(k) for k in d['rows']]
+try:
+    print(f'scored {ml.predict(fs["name"], ids)} listings with the stored model')
+except SystemExit as e:        # no model trained yet — fine, train once afterwards
+    print(e)

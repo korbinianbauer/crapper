@@ -21,6 +21,7 @@ from flask import (Flask, Response, abort, flash, jsonify, redirect, render_temp
 import archive
 import pagearchive
 import db
+import ml
 import sources
 from poller import poll_tracker
 
@@ -435,6 +436,7 @@ def listing_archive(listing_id):
     if fair:
         cur_price = next((p['price'] for p in reversed(prices) if p['price'] is not None), None)
         fair['current'] = cur_price
+        fair['plausible'] = ml.is_plausible(cur_price, fair['features'], fair['metrics'].get('per'))
         fair['delta_pct'] = round((cur_price / fair['fair_price'] - 1) * 100) if cur_price else None
         m = fair['metrics']
         fair['mae'] = m['candidates'][m['chosen']]['mae']

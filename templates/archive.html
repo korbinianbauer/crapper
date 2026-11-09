@@ -81,14 +81,14 @@
   <div><div class="lbl">Aktueller Preis</div><div class="big">{{ '{:,.0f}'.format(fair.current).replace(',', '.') }} €</div></div>
   <div><div class="lbl">Einordnung</div>
     {% set d = fair.delta_pct %}
-    {% if not fair.oof %}<div class="muted" style="font-size:.85rem;">Preis unplausibel (z. B. Tausch/Platzhalter) – Einordnung nicht sinnvoll</div>
+    {% if not fair.plausible %}<div class="muted" style="font-size:.85rem;">Preis unplausibel (z. B. Tausch/Platzhalter) – Einordnung nicht sinnvoll</div>
     {% else %}<div class="big {{ 'cheap' if d <= -10 else ('dear' if d >= 10 else '') }}">
       {% if d <= -10 %}{{ -d }} % unter fair{% elif d >= 10 %}{{ d }} % über fair{% else %}fair ({{ '%+d'|format(d) }} %){% endif %}</div>{% endif %}</div>
   {% endif %}
   <div class="muted" style="font-size:.78rem; max-width:34rem;">
     Modell: {{ fair.algo|replace('_', ' ') }}, trainiert am {{ fair.trained_at[:10] }} auf {{ fair.n_train }} Anzeigen.
     Typische Abweichung ±{{ fair.median_ape }} % (mittlerer Fehler {{ fair.mae|round|int }} €).
-    {% if not fair.oof %}Diese Anzeige hatte keinen verwertbaren Preis im Training.{% else %}Schätzung ohne Kenntnis des eigenen Preises (Cross-Validation).{% endif %}
+    Schätzung ohne Kenntnis des eigenen Preises.
     Preise ≙ Angebotspreis, keine Garantie.</div>
   {% if fair.facts %}<details><summary>Verwendete Eigenschaften ({{ fair.facts|length }})</summary>
     {% for label, v in fair.facts %}{{ label }}{% if v is not sameas true %}: <b>{{ v }}</b>{% endif %}{% if not loop.last %} · {% endif %}{% endfor %}

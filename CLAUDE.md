@@ -129,9 +129,12 @@ count, summary}` (or an error) — the frontend calls it live as the user pastes
   repeated 5-fold CV on log(price), keeps only the newest model per set, and writes
   `fair_prices`: training listings get their out-of-fold prediction (`oof=1`), others the full
   model's. Listings with implausible prices (€/m² outside 4–40) are excluded from training.
-  The archive view (`/listing/<id>/archive`) shows fair vs. current price. Currently only
-  set `wohnung_miete_v1` (KA tracker 10, rental flats) exists; new listings get no fair price
-  until their features are extracted and the model re-trained.
+  Training is a **one-off**; new listings are scored with the stored model (`ml.predict`,
+  no retraining) — `scripts/import_features.py` does that right after loading their features
+  (or `python ml.py predict <set>` for any with features but no prediction). The archive view
+  (`/listing/<id>/archive`) shows fair vs. current price. Currently only set
+  `wohnung_miete_v1` (KA tracker 10, rental flats) exists; a listing gets a fair price once
+  its features have been extracted and imported.
 - **`settings`** — `poll_cron` (default `0 4 * * *`), `search_pages`.
 
 `init_db()` drops & recreates the data tables if it detects a pre-multi-source

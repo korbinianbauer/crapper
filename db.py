@@ -164,8 +164,8 @@ def init_db():
                 metrics        TEXT NOT NULL,     -- JSON: CV scores of all candidates + chosen one
                 artifact       BLOB NOT NULL      -- joblib (encoder + fitted estimator)
             );
-            -- Latest prediction per listing and model. oof=1: made by a model that did not
-            -- see this listing's price (cross-validation), i.e. an honest estimate.
+            -- Prediction per listing and model, always made without the model having seen
+            -- the listing's price: out-of-fold for training listings, the stored model for new ones.
             CREATE TABLE IF NOT EXISTS fair_prices (
                 listing_id   INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
                 model_id     INTEGER NOT NULL REFERENCES ml_models(id) ON DELETE CASCADE,
@@ -537,9 +537,9 @@ def get_training_rows(feature_set_id: int) -> list[dict]:
 
 
 def save_model(feature_set_id: int, algo: str, n_train: int, metrics: dict, artifact: bytes,
-               predictions: dict[int, tuple[float, bool]]) -> int:
+               predictions: dict[int, float]) -> int:
     """Store a trained model and (replacing older models' rows) its predictions
-    {listing_id: (fair_price, out_of_fold)}."""
+    {listing_id: fair_price}."""
     import json
     now = _now()
     with get_db() as conn:
@@ -548,12 +548,28 @@ def save_model(feature_set_id: int, algo: str, n_train: int, metrics: dict, arti
                            (feature_set_id, algo, now, n_train, json.dumps(metrics), artifact))
         mid = cur.lastrowid
         conn.executemany('''INSERT INTO fair_prices (listing_id, model_id, fair_price, oof, predicted_at)
-                            VALUES (?, ?, ?, ?, ?)''',
-                         [(lid, mid, p, int(o), now) for lid, (p, o) in predictions.items()])
+                            VALUES (?, ?, ?, 1, ?)''',
+                         [(lid, mid, p, now) for lid, p in predictions.items()])
         # keep only the newest model per feature set (predictions cascade)
         conn.execute('DELETE FROM ml_models WHERE feature_set_id = ? AND id != ?',
                      (feature_set_id, mid))
     return mid
+
+
+def get_latest_model(feature_set_id: int) -> dict | None:
+    with get_db() as conn:
+        r = conn.execute('SELECT id, algo, artifact FROM ml_models WHERE feature_set_id = ? '
+                         'ORDER BY id DESC LIMIT 1', (feature_set_id,)).fetchone()
+    return dict(r) if r else None
+
+
+def save_predictions(model_id: int, predictions: dict[int, float]) -> None:
+    """Predictions of an existing model for listings it was not trained on."""
+    now = _now()
+    with get_db() as conn:
+        conn.executemany('''INSERT OR REPLACE INTO fair_prices
+                            (listing_id, model_id, fair_price, oof, predicted_at) VALUES (?, ?, ?, 1, ?)''',
+                         [(lid, model_id, p, now) for lid, p in predictions.items()])
 
 
 def get_fair_price(listing_id: int) -> dict | None:

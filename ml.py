@@ -6,7 +6,11 @@ repeated cross-validation, fits it on all usable listings and stores model +
 predictions (`ml_models`, `fair_prices`). Training listings get their *out-of-fold*
 prediction, so "fair price vs. asking price" is never an in-sample fit.
 
-    python ml.py train wohnung_miete_v1
+Training happens once. New listings are scored with the stored model by `predict()`
+as soon as their features have been extracted and imported (no retraining).
+
+    python ml.py train wohnung_miete_v1      # one-off
+    python ml.py predict wohnung_miete_v1    # score listings that have features but no prediction
 """
 import io
 import math
@@ -137,13 +141,11 @@ def train(feature_set_name: str, per: str | None = 'wohnflaeche') -> dict:
     oof_by_id = {r['listing_id']: float(oofs[best][i]) for i, r in enumerate(train_rows)}
     for r in rows:
         lid = r['listing_id']
-        if lid in oof_by_id:
-            preds[lid] = (oof_by_id[lid], True)
-        else:
-            preds[lid] = (float(np.exp(model.predict(enc.transform([r['features']]))[0])), False)
+        preds[lid] = oof_by_id[lid] if lid in oof_by_id else float(
+            np.exp(model.predict(enc.transform([r['features']]))[0]))
 
     imp = _importances(model, best, X, y, enc.names)
-    metrics = {'chosen': best, 'candidates': scores, 'n_features': len(enc.names),
+    metrics = {'chosen': best, 'per': per, 'candidates': scores, 'n_features': len(enc.names),
                'n_excluded': len(rows) - len(train_rows), 'importance': imp}
     buf = io.BytesIO()
     joblib.dump({'encoder': enc, 'model': model, 'algo': best}, buf)
@@ -154,6 +156,40 @@ def train(feature_set_name: str, per: str | None = 'wohnflaeche') -> dict:
               + ('  <- chosen' if n == best else ''))
     print('  top features:', ', '.join(f'{k} ({v:.3f})' for k, v in imp[:8]))
     return metrics
+
+
+def is_plausible(price, features, per) -> bool:
+    return _sane({'price': price, 'features': features}, per)
+
+
+def predict(feature_set_name: str, listing_ids=None) -> int:
+    """Score listings with the stored model. Default: every listing that has features
+    but no prediction yet. Explicit ids are re-scored (except training listings, whose
+    out-of-fold prediction is kept). Returns the number of predictions written."""
+    import joblib
+    fs = db.get_feature_set(feature_set_name)
+    model_row = db.get_latest_model(fs['id']) if fs else None
+    if not model_row:
+        raise SystemExit(f'no trained model for {feature_set_name!r} — run: python ml.py train')
+    art = joblib.load(io.BytesIO(model_row['artifact']))
+    with db.get_db() as conn:
+        have = {r[0] for r in conn.execute(
+            'SELECT listing_id FROM fair_prices WHERE model_id = ?', (model_row['id'],))}
+        trained = {r[0] for r in conn.execute(
+            'SELECT listing_id FROM fair_prices WHERE model_id = ? AND predicted_at = '
+            '(SELECT trained_at FROM ml_models WHERE id = ?)', (model_row['id'], model_row['id']))}
+    rows = db.get_training_rows(fs['id'])
+    if listing_ids is None:
+        todo = [r for r in rows if r['listing_id'] not in have]
+    else:
+        wanted = set(listing_ids)
+        todo = [r for r in rows if r['listing_id'] in wanted and r['listing_id'] not in trained]
+    if not todo:
+        return 0
+    X = art['encoder'].transform([r['features'] for r in todo])
+    pred = np.exp(art['model'].predict(X))
+    db.save_predictions(model_row['id'], {r['listing_id']: float(p) for r, p in zip(todo, pred)})
+    return len(todo)
 
 
 def _importances(model, algo, X, y, names):
@@ -168,5 +204,8 @@ if __name__ == '__main__':
     if len(sys.argv) == 3 and sys.argv[1] == 'train':
         db.init_db()
         train(sys.argv[2])
+    elif len(sys.argv) == 3 and sys.argv[1] == 'predict':
+        db.init_db()
+        print(predict(sys.argv[2]), 'predictions written')
     else:
         print(__doc__)
