@@ -1,12 +1,13 @@
 """Fair-price model: features of a listing -> expected price.
 
-Features live in `listing_features` (extracted manually, see scripts/features/).
+Features live in `listing_features` (extracted manually by an LLM agent, no script).
 `train(feature_set_name)` encodes them, picks the best of a few small regressors by
 repeated cross-validation, fits it on all usable listings and stores model +
 predictions (`ml_models`, `fair_prices`). Training listings get their *out-of-fold*
 prediction, so "fair price vs. asking price" is never an in-sample fit.
 
-Training happens once. New listings are scored with the stored model by `predict()`
+Training is triggered on the settings page (or the CLI); every model is kept and one is
+chosen as active there. New listings are scored with the active model by `predict()`
 as soon as their features have been extracted and imported (no retraining).
 
     python ml.py train wohnung_miete_v1      # one-off
@@ -101,7 +102,7 @@ def _sane(row, per):
     return True
 
 
-def train(feature_set_name: str, per: str | None = 'wohnflaeche') -> dict:
+def train(feature_set_name: str, per: str | None = 'wohnflaeche', activate: bool = True) -> dict:
     import joblib
     from sklearn.model_selection import KFold, cross_val_predict
 
@@ -149,7 +150,8 @@ def train(feature_set_name: str, per: str | None = 'wohnflaeche') -> dict:
                'n_excluded': len(rows) - len(train_rows), 'importance': imp}
     buf = io.BytesIO()
     joblib.dump({'encoder': enc, 'model': model, 'algo': best}, buf)
-    mid = db.save_model(fs['id'], best, len(train_rows), metrics, buf.getvalue(), preds)
+    mid = db.save_model(fs['id'], best, len(train_rows), metrics, buf.getvalue(), preds, activate)
+    metrics['model_id'] = mid
     print(f'model {mid}: {best}  n={len(train_rows)} (excluded {len(rows) - len(train_rows)})')
     for n, s in scores.items():
         print(f'  {n:18} MAE {s["mae"]:7.1f} €  median |err| {s["median_ape"]*100:4.1f} %  R² {s["r2"]:.3f}'
@@ -177,13 +179,13 @@ def _load_artifact(blob: bytes) -> dict:
             del main.Encoder
 
 
-def predict(feature_set_name: str, listing_ids=None) -> int:
+def predict(feature_set_name: str, listing_ids=None, model_id: int | None = None) -> int:
     """Score listings with the stored model. Default: every listing that has features
     but no prediction yet. Explicit ids are re-scored (except training listings, whose
     out-of-fold prediction is kept). Returns the number of predictions written."""
     import joblib
     fs = db.get_feature_set(feature_set_name)
-    model_row = db.get_latest_model(fs['id']) if fs else None
+    model_row = (db.get_model(model_id) if model_id else db.get_latest_model(fs['id'])) if fs else None
     if not model_row:
         raise SystemExit(f'no trained model for {feature_set_name!r} — run: python ml.py train')
     art = _load_artifact(model_row['artifact'])

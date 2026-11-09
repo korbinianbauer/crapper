@@ -661,6 +661,118 @@ def refresh_all():
     return redirect(url_for('index'))
 
 
+# ── settings ───────────────────────────────────────────────────────────────────
+
+SETTINGS_PAGES = [('fair_pricing', 'Fair-Pricing-Modell')]
+_trainings: dict[int, dict] = {}      # feature_set_id -> {status: running|done|error, msg}
+
+
+@app.route('/settings')
+@login_required
+def settings_index():
+    return redirect(url_for('settings_fair_pricing'))
+
+
+def _fair_stats(fs: dict, fair_map: dict) -> dict:
+    """How the asking prices of the feature set's listings relate to the *raw* ML prediction
+    (median price / prediction - 1, in %) — the number to look at when choosing an offset."""
+    ratios = []
+    per = (fs['models'][0]['metrics'].get('per') if fs['models'] else None)
+    for r in db.get_training_rows(fs['id']):
+        f = fair_map.get(r['listing_id'])
+        if f and r['price'] and ml.is_plausible(r['price'], r['features'], per):
+            ratios.append(r['price'] / f['raw'])
+    if not ratios:
+        return {}
+    return {'n': len(ratios), 'median_pct': round((statistics.median(ratios) - 1) * 100, 1)}
+
+
+@app.route('/settings/fair-pricing')
+@login_required
+def settings_fair_pricing():
+    sets = db.get_feature_sets_overview()
+    fair_map = db.get_fair_price_map()
+    for fs in sets:
+        fs['train'] = _trainings.get(fs['id'])
+        fs['stats'] = _fair_stats(fs, fair_map)
+        for m in fs['models']:
+            c = m['metrics']['candidates'][m['metrics']['chosen']]
+            m['mae'], m['median_ape'], m['r2'] = round(c['mae']), round(c['median_ape'] * 100, 1), c['r2']
+    return render_template('settings_fair_pricing.html', sets=sets, pages=SETTINGS_PAGES,
+                           page='fair_pricing')
+
+
+@app.route('/settings/fair-pricing/status')
+@login_required
+def settings_fair_pricing_status():
+    return jsonify({str(k): v for k, v in _trainings.items()})
+
+
+@app.route('/settings/fair-pricing/<int:fs_id>/train', methods=['POST'])
+@login_required
+@csrf_protect
+def settings_train_model(fs_id):
+    fs = db.get_feature_set_by_id(fs_id)
+    if not fs:
+        abort(404)
+    if _trainings.get(fs_id, {}).get('status') == 'running':
+        flash('Training läuft bereits.', 'error')
+        return redirect(url_for('settings_fair_pricing'))
+    activate = request.form.get('activate') == '1'
+    _trainings[fs_id] = {'status': 'running', 'msg': '', 'started': datetime.utcnow().isoformat(timespec='seconds')}
+
+    def _run():
+        try:
+            metrics = ml.train(fs['name'], activate=activate)
+            c = metrics['candidates'][metrics['chosen']]
+            _trainings[fs_id] = {'status': 'done', 'msg': f"Modell {metrics['model_id']} ({metrics['chosen'].replace('_', ' ')}, "
+                                 f"Ø-Fehler {c['mae']:.0f} €) trainiert" + (' und aktiviert.' if activate else '.')}
+        except BaseException as e:          # ml.train signals "too few listings" via SystemExit
+            logger.exception('Training of feature set %s failed', fs['name'])
+            _trainings[fs_id] = {'status': 'error', 'msg': str(e) or e.__class__.__name__}
+
+    threading.Thread(target=_run, daemon=True).start()
+    return redirect(url_for('settings_fair_pricing'))
+
+
+@app.route('/settings/fair-pricing/<int:fs_id>/model', methods=['POST'])
+@login_required
+@csrf_protect
+def settings_select_model(fs_id):
+    fs = db.get_feature_set_by_id(fs_id)
+    try:
+        model_id = int(request.form.get('model_id', ''))
+    except ValueError:
+        abort(400)
+    if not fs or not db.set_active_model(fs_id, model_id):
+        abort(404)
+    try:        # listings added since that model was trained still need a prediction from it
+        ml.predict(fs['name'], model_id=model_id)
+    except SystemExit as e:
+        flash(str(e), 'error')
+    flash(f'Modell {model_id} wird jetzt für den fairen Preis verwendet.', 'ok')
+    return redirect(url_for('settings_fair_pricing'))
+
+
+@app.route('/settings/fair-pricing/<int:fs_id>/offset', methods=['POST'])
+@login_required
+@csrf_protect
+def settings_set_offset(fs_id):
+    if not db.get_feature_set_by_id(fs_id):
+        abort(404)
+    raw = request.form.get('offset', '').strip().replace(',', '.').replace('%', '')
+    try:
+        pct = float(raw or 0)
+    except ValueError:
+        pct = math.nan
+    if not math.isfinite(pct) or not -90 <= pct <= 200:
+        flash('Offset muss eine Zahl zwischen -90 und 200 (%) sein.', 'error')
+    else:
+        db.set_fair_offset(fs_id, round(pct, 2))
+        flash(f'Offset {pct:+g} % gespeichert.', 'ok')
+    return redirect(url_for('settings_fair_pricing'))
+
+
 @app.route('/refresh_status')
 def refresh_status():
     return jsonify({'running': list(_active_refreshes)})

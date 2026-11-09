@@ -93,6 +93,7 @@
   <div class="muted" style="font-size:.78rem; max-width:34rem;">
     Modell: {{ fair.algo|replace('_', ' ') }}, trainiert am {{ fair.trained_at[:10] }} auf {{ fair.n_train }} Anzeigen.
     Typische Abweichung ±{{ fair.median_ape }} % (mittlerer Fehler {{ fair.mae|round|int }} €).
+    {% if fair.offset %}ML-Vorhersage {{ '{:,.0f}'.format(fair.raw).replace(',', '.') }} € mit manuellem Offset {{ '%+g'|format(fair.offset) }} %.{% endif %}
     Schätzung ohne Kenntnis des eigenen Preises.
     Preise ≙ Angebotspreis, keine Garantie.</div>
   {% if fair.facts %}<details><summary>Bewertete Eigenschaften ({{ fair.facts|length }})</summary>

@@ -99,9 +99,9 @@ price and the ML rating (`fair_delta` = asking price vs. fair price in %, negati
 | `sources/kleinanzeigen.py`, `sources/immoscout.py` | the two sources |
 | `pagearchive.py` | archives a stored page's CSS/fonts/images (Wayback-style) + helpers to rewrite them |
 | `ml.py` | fair-price model: `Encoder`, CV model selection, `train(feature_set)`; CLI `python ml.py train <set>` |
-| `scripts/features/`, `scripts/import_features.py` | **manual** feature extraction (JSON) + loader into the DB |
 | `poller.py` | `poll_tracker()` / `poll_all_due()` — orchestrates source → DB |
 | `poll.py` | APScheduler cron loop (separate process) |
+| `templates/settings_fair_pricing.html` | Settings page (login only, `/settings`, sub-pages in `SETTINGS_PAGES`): train a model per feature set/tracker (background thread), choose the active model, set the display offset |
 | `templates/index.html` | Listing grid + Plotly charts + single add-by-URL modal with live `/inspect` preview |
 
 ### Database schema (`crapper.db`)
@@ -132,15 +132,16 @@ price and the ML rating (`fair_delta` = asking price vs. fair price in %, negati
   `/archive/asset/<hash>`. Only css/image/font types are stored; fetches are SSRF-guarded.
 - **`feature_sets`** / **`listing_features`** / **`ml_models`** / **`fair_prices`** — the ML
   "fair price" (`ml.py`). A feature set (≤30 features, JSON definition: key/label/type
-  num|bool|cat) belongs to one tracker; values per listing are extracted **manually, not by
-  the app** (`scripts/features/extract_wohnung_miete.py` → JSON → `scripts/import_features.py`).
+  num|bool|cat) belongs to one tracker; values per listing are extracted **by an LLM agent
+  reading each ad by hand — there is deliberately no extraction script/regex**; the agent writes the values straight into the DB
+  via `db.save_listing_features(feature_set_id, {listing_id: {feature: value}})` (inline Python on the server, venv).
   `python ml.py train <set>` picks the best of ridge/SVR/random forest/gradient boosting by
-  repeated 5-fold CV on log(price), keeps only the newest model per set, and writes
+  repeated 5-fold CV on log(price), stores the model (last 10 per set are kept) and writes
   `fair_prices`: training listings get their out-of-fold prediction, all others (excluded
   or new) the stored model's — so every stored fair price is made without knowing that
   listing's price (`oof` is always 1; kept for schema compatibility). Listings with implausible prices (€/m² outside 4–40) are excluded from training.
-  Training is a **one-off**; new listings are scored with the stored model (`ml.predict`,
-  no retraining) — `scripts/import_features.py` does that right after loading their features
+  Training is triggered by hand (settings page or CLI); new listings are scored with the **active** model (`ml.predict`,
+  no retraining) — run `ml.predict(<set>, ids)` right after saving their features
   (or `python ml.py predict <set>` for any with features but no prediction). The archive view
   (`/listing/<id>/archive`) shows fair vs. current price plus a collapsible table of all
   evaluated features. Currently only set `wohnung_miete_v1` (KA tracker 10, rental flats)
@@ -148,9 +149,14 @@ price and the ML rating (`fair_delta` = asking price vs. fair price in %, negati
   Models are pickled via joblib; `ml.py` is always run as an importable module
   (`_ml.train`) and `_load_artifact` also loads older models pickled under `__main__`.
   Workflow for new listings (run on the server, venv):
-  `python scripts/features/extract_wohnung_miete.py crapper.db 10 /tmp/f.json &&
-  python scripts/import_features.py /tmp/f.json` (extraction = review the regex output by hand
-  when text is unusual; the place→coordinates table in the extractor must be extended for new towns).
+  read the new listings' texts (ad description + Details block) yourself, save them with
+  `db.save_listing_features`, then `ml.predict`. Read negations carefully ("kein Aufzug", "ohne
+  Einbauküche"), ignore wish lists in Tausch ads, skip wanted ads ("Suche …"); place→km distances are
+  estimated by the agent from the town.
+- **Fair-price settings** (`/settings/fair-pricing`, keys in `settings`): `fair_model_<feature_set_id>` =
+  active model (default: newest), `fair_offset_<feature_set_id>` = manual offset in % (-10 → shown fair
+  price is 10 % below the ML prediction, to bridge asking prices vs. real deals). The offset is applied
+  at read time (`db.get_fair_price_map` / `get_fair_price`); `fair_prices` always stores the raw prediction.
 - **`settings`** — `poll_cron` (default `0 4 * * *`), `search_pages`.
 
 `init_db()` drops & recreates the data tables if it detects a pre-multi-source

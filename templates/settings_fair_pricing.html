@@ -1,0 +1,141 @@
+{% extends "base.html" %}
+{% block title %}Settings · Fair-Pricing-Modell · crapper{% endblock %}
+{% block head %}
+<style>
+  .settings { display:grid; grid-template-columns:13rem 1fr; gap:1.5rem; align-items:start; }
+  @media (max-width: 760px) { .settings { grid-template-columns:1fr; } }
+  .snav { display:flex; flex-direction:column; gap:.25rem; padding:.5rem; }
+  .snav a { color:var(--muted); text-decoration:none; padding:.5rem .75rem; border-radius:8px; font-size:.9rem; }
+  .snav a:hover { background:var(--surface-2); color:var(--text); }
+  .snav a.on { background:var(--surface-2); color:var(--text); font-weight:600; }
+  .fs { margin-bottom:1.5rem; }
+  .fs h2 { margin-bottom:.15rem; }
+  .fs section { margin-top:1.25rem; padding-top:1rem; border-top:1px solid var(--border); }
+  .fs h3 { font-size:.8rem; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin-bottom:.6rem; }
+  .row { display:flex; flex-wrap:wrap; gap:.75rem 1.25rem; align-items:flex-end; }
+  .row .fld { width:11rem; }
+  .hint { color:var(--muted); font-size:.8rem; margin-top:.5rem; max-width:44rem; line-height:1.45; }
+  table.models { width:100%; border-collapse:collapse; font-size:.85rem; }
+  table.models th { text-align:left; color:var(--muted); font-size:.72rem; text-transform:uppercase;
+                    letter-spacing:.04em; padding:.35rem .6rem; border-bottom:1px solid var(--border); }
+  table.models td { padding:.45rem .6rem; border-bottom:1px solid var(--border); }
+  table.models tr.active td { background:rgba(34,197,94,.08); }
+  .chk { display:flex; gap:.4rem; align-items:center; font-size:.85rem; color:var(--text);
+         text-transform:none; letter-spacing:0; font-weight:400; margin:0; }
+  .chk input { width:auto; }
+  .tbox { margin-top:.75rem; font-size:.85rem; }
+  .tbox.err { color:var(--danger); }
+</style>
+{% endblock %}
+{% block content %}
+<h1>Settings</h1>
+<p class="muted gap">Einstellungen sind nur nach der Anmeldung sichtbar.</p>
+<div class="settings">
+  <nav class="card snav">
+    {% for slug, title in pages %}
+    <a href="{{ url_for('settings_' + slug) }}" class="{{ 'on' if slug == page }}">{{ title }}</a>
+    {% endfor %}
+  </nav>
+
+  <div>
+    <h2>Fair-Pricing-Modell</h2>
+    {% if not sets %}
+    <div class="card muted">Noch kein Feature-Set vorhanden. Features werden per LLM-Agent eingetragen
+      (siehe CLAUDE.md); danach kann hier ein Modell trainiert werden.</div>
+    {% endif %}
+
+    {% for fs in sets %}
+    <div class="card fs" data-fs="{{ fs.id }}">
+      <h2>{{ fs.label or fs.url or ('Tracker ' ~ fs.tracker_id if fs.tracker_id else '(kein Tracker)') }}
+        <span class="badge badge-grey">{{ fs.name }}</span></h2>
+      <div class="muted" style="font-size:.85rem;">
+        {% if fs.tracker_id %}Tracker {{ fs.tracker_id }} · {% endif %}{{ fs.n_features }} Anzeigen mit eingetragenen Features
+        · {{ fs.definition.features|length }} Merkmale</div>
+
+      <section>
+        <h3>Neues Modell erzeugen</h3>
+        <form method="post" action="{{ url_for('settings_train_model', fs_id=fs.id) }}" class="row">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+          <label class="chk"><input type="checkbox" name="activate" value="1" checked> nach dem Training aktivieren</label>
+          <button class="btn btn-primary" type="submit"
+                  {% if fs.train and fs.train.status == 'running' %}disabled{% endif %}>
+            {% if fs.train and fs.train.status == 'running' %}<span class="spinner"></span> Training läuft …
+            {% else %}Modell trainieren{% endif %}</button>
+        </form>
+        <div class="hint">Trainiert mit allen aktuellen Anzeigen, für die bereits Features eingetragen sind
+          (Anzeigen mit unplausiblem Preis werden ausgeschlossen). Aus Ridge, SVR, Random Forest und Gradient
+          Boosting wird per Kreuzvalidierung das beste gewählt; das dauert etwa eine Minute. Ältere Modelle
+          bleiben erhalten (die letzten {{ 10 }}).</div>
+        {% if fs.train and fs.train.status != 'running' %}
+        <div class="tbox {{ 'err' if fs.train.status == 'error' }}">{{ fs.train.msg }}</div>
+        {% endif %}
+      </section>
+
+      <section>
+        <h3>Verwendetes Modell</h3>
+        {% if fs.models %}
+        <form method="post" action="{{ url_for('settings_select_model', fs_id=fs.id) }}">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+          <table class="models">
+            <tr><th></th><th>Modell</th><th>Algorithmus</th><th>Trainiert</th><th>Anzeigen</th>
+                <th>Ø-Fehler</th><th>Median-Fehler</th><th>R²</th></tr>
+            {% for m in fs.models %}
+            <tr class="{{ 'active' if m.id == fs.active_model_id }}">
+              <td><input type="radio" name="model_id" value="{{ m.id }}" style="width:auto;"
+                         {{ 'checked' if m.id == fs.active_model_id }}></td>
+              <td>#{{ m.id }} {% if m.id == fs.active_model_id %}<span class="badge badge-green">aktiv</span>{% endif %}</td>
+              <td>{{ m.algo|replace('_', ' ') }}</td>
+              <td>{{ m.trained_at[:16]|replace('T', ' ') }}</td>
+              <td>{{ m.n_train }}</td>
+              <td>{{ m.mae }} €</td>
+              <td>{{ m.median_ape }} %</td>
+              <td>{{ m.r2 }}</td>
+            </tr>
+            {% endfor %}
+          </table>
+          <button class="btn btn-outline btn-sm" type="submit" style="margin-top:.75rem;">Ausgewähltes Modell verwenden</button>
+        </form>
+        <div class="hint">Fehler = Kreuzvalidierung auf den Trainingsanzeigen. Das aktive Modell bestimmt den
+          fairen Preis überall (Tracker-Ansicht, Archiv, neue Anzeigen).</div>
+        {% else %}
+        <div class="muted" style="font-size:.9rem;">Noch kein Modell trainiert.</div>
+        {% endif %}
+      </section>
+
+      <section>
+        <h3>Offset der Anzeige</h3>
+        <form method="post" action="{{ url_for('settings_set_offset', fs_id=fs.id) }}" class="row">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+          <div class="fld"><label for="off{{ fs.id }}">Offset in %</label>
+            <input id="off{{ fs.id }}" name="offset" inputmode="decimal" value="{{ '%g'|format(fs.offset) }}"
+                   placeholder="z. B. -10"></div>
+          <button class="btn btn-primary" type="submit">Speichern</button>
+        </form>
+        <div class="hint">Korrigiert den Fair Price manuell: <b>-10</b> zeigt immer einen 10&nbsp;% niedrigeren Preis
+          als die ML-Vorhersage an. Damit lässt sich der Unterschied zwischen Angebotspreisen und tatsächlichen
+          Abschlüssen ausgleichen. Wirkt sofort auf Fair Price und Bewertung (unter/über fair); gespeichert
+          werden weiterhin die unveränderten Vorhersagen.
+          {% if fs.stats %}<br>Zur Orientierung: Die Angebotspreise von {{ fs.stats.n }} Anzeigen liegen im Median
+          <b>{{ '%+g'|format(fs.stats.median_pct) }} %</b> gegenüber der reinen ML-Vorhersage des aktiven Modells
+          (kreuzvalidiert).{% endif %}</div>
+      </section>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{% if sets|selectattr('train')|selectattr('train.status', 'equalto', 'running')|list %}
+<script>
+// While a model is training, poll until it is finished and then reload the page.
+(function poll() {
+  fetch('{{ url_for("settings_fair_pricing_status") }}', {headers: {'Accept': 'application/json'}})
+    .then(r => r.json())
+    .then(s => { if (Object.values(s).some(t => t.status === 'running')) setTimeout(poll, 3000);
+                 else location.reload(); })
+    .catch(() => setTimeout(poll, 5000));
+})();
+</script>
+{% endif %}
+{% endblock %}

@@ -139,7 +139,7 @@ def init_db():
 
             -- ML "fair price": a feature set defines up to 30 named features (JSON list of
             -- {key,label,type}) for the listings of one tracker; values are extracted
-            -- manually (scripts/features/) and stored per listing; models are trained from them.
+            -- manually by an LLM agent and stored per listing; models are trained from them.
             CREATE TABLE IF NOT EXISTS feature_sets (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 name        TEXT NOT NULL UNIQUE,
@@ -536,13 +536,20 @@ def get_training_rows(feature_set_id: int) -> list[dict]:
             for r in rows]
 
 
+KEEP_MODELS = 10          # trained models kept per feature set (the active one is never pruned)
+
+
 def save_model(feature_set_id: int, algo: str, n_train: int, metrics: dict, artifact: bytes,
-               predictions: dict[int, float]) -> int:
-    """Store a trained model and (replacing older models' rows) its predictions
-    {listing_id: fair_price}."""
-    import json
+               predictions: dict[int, float], activate: bool = True) -> int:
+    """Store a trained model and its predictions {listing_id: raw fair_price}. Older models
+    stay selectable (settings page); only the oldest beyond KEEP_MODELS are pruned."""
     now = _now()
     with get_db() as conn:
+        if not activate:    # keep the current model (default = newest) from being displaced
+            cur_active = _active_model_id(conn, feature_set_id)
+            if cur_active:
+                conn.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)',
+                             (f'fair_model_{feature_set_id}', str(cur_active)))
         cur = conn.execute('''INSERT INTO ml_models (feature_set_id, algo, trained_at, n_train,
                                                      metrics, artifact) VALUES (?, ?, ?, ?, ?, ?)''',
                            (feature_set_id, algo, now, n_train, json.dumps(metrics), artifact))
@@ -550,17 +557,104 @@ def save_model(feature_set_id: int, algo: str, n_train: int, metrics: dict, arti
         conn.executemany('''INSERT INTO fair_prices (listing_id, model_id, fair_price, oof, predicted_at)
                             VALUES (?, ?, ?, 1, ?)''',
                          [(lid, mid, p, now) for lid, p in predictions.items()])
-        # keep only the newest model per feature set (predictions cascade)
-        conn.execute('DELETE FROM ml_models WHERE feature_set_id = ? AND id != ?',
-                     (feature_set_id, mid))
+        if activate:
+            conn.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)',
+                         (f'fair_model_{feature_set_id}', str(mid)))
+        active = _active_model_id(conn, feature_set_id)
+        conn.execute('''DELETE FROM ml_models WHERE feature_set_id = ? AND id != ? AND id NOT IN (
+                          SELECT id FROM ml_models WHERE feature_set_id = ? ORDER BY id DESC LIMIT ?)''',
+                     (feature_set_id, active, feature_set_id, KEEP_MODELS))
     return mid
 
 
-def get_latest_model(feature_set_id: int) -> dict | None:
+def _active_model_id(conn, feature_set_id: int) -> int | None:
+    """The model used for display: the one chosen on the settings page, else the newest."""
+    r = conn.execute('SELECT value FROM settings WHERE key = ?',
+                     (f'fair_model_{feature_set_id}',)).fetchone()
+    if r and r[0].isdigit() and conn.execute(
+            'SELECT 1 FROM ml_models WHERE id = ? AND feature_set_id = ?',
+            (int(r[0]), feature_set_id)).fetchone():
+        return int(r[0])
+    r = conn.execute('SELECT MAX(id) FROM ml_models WHERE feature_set_id = ?',
+                     (feature_set_id,)).fetchone()
+    return r[0]
+
+
+def _fair_offset(conn, feature_set_id: int) -> float:
+    r = conn.execute('SELECT value FROM settings WHERE key = ?',
+                     (f'fair_offset_{feature_set_id}',)).fetchone()
+    try:
+        return float(r[0]) if r else 0.0
+    except ValueError:
+        return 0.0
+
+
+def get_fair_offset(feature_set_id: int) -> float:
+    """Manual correction of the displayed fair price in percent (-10 = show 10 % less than
+    the ML prediction), to bridge asking prices vs. actual deals."""
     with get_db() as conn:
-        r = conn.execute('SELECT id, algo, artifact FROM ml_models WHERE feature_set_id = ? '
-                         'ORDER BY id DESC LIMIT 1', (feature_set_id,)).fetchone()
+        return _fair_offset(conn, feature_set_id)
+
+
+def set_fair_offset(feature_set_id: int, pct: float):
+    set_setting(f'fair_offset_{feature_set_id}', repr(float(pct)))
+
+
+def set_active_model(feature_set_id: int, model_id: int) -> bool:
+    with get_db() as conn:
+        if not conn.execute('SELECT 1 FROM ml_models WHERE id = ? AND feature_set_id = ?',
+                            (model_id, feature_set_id)).fetchone():
+            return False
+        conn.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)',
+                     (f'fair_model_{feature_set_id}', str(model_id)))
+    return True
+
+
+def get_latest_model(feature_set_id: int) -> dict | None:
+    """The active model (see _active_model_id) incl. its artifact."""
+    with get_db() as conn:
+        mid = _active_model_id(conn, feature_set_id)
+        r = conn.execute('SELECT id, algo, artifact FROM ml_models WHERE id = ?',
+                         (mid,)).fetchone() if mid else None
     return dict(r) if r else None
+
+
+def get_model(model_id: int) -> dict | None:
+    with get_db() as conn:
+        r = conn.execute('SELECT id, feature_set_id, algo, artifact FROM ml_models WHERE id = ?',
+                         (model_id,)).fetchone()
+    return dict(r) if r else None
+
+
+def get_feature_set_by_id(feature_set_id: int) -> dict | None:
+    with get_db() as conn:
+        r = conn.execute('SELECT id, name, tracker_id FROM feature_sets WHERE id = ?',
+                         (feature_set_id,)).fetchone()
+    return dict(r) if r else None
+
+
+def get_feature_sets_overview() -> list[dict]:
+    """Every feature set with its tracker, #listings with features, models (newest first),
+    the active model id and the display offset — for the settings page."""
+    out = []
+    with get_db() as conn:
+        for fs in conn.execute('''SELECT f.id, f.name, f.tracker_id, f.definition, t.label, t.url, t.source
+                                  FROM feature_sets f LEFT JOIN trackers t ON t.id = f.tracker_id
+                                  ORDER BY f.id''').fetchall():
+            d = dict(fs)
+            d['definition'] = json.loads(d['definition'])
+            d['n_features'] = conn.execute(
+                'SELECT COUNT(*) FROM listing_features WHERE feature_set_id = ?', (fs['id'],)).fetchone()[0]
+            d['models'] = []
+            for m in conn.execute('''SELECT id, algo, trained_at, n_train, metrics FROM ml_models
+                                     WHERE feature_set_id = ? ORDER BY id DESC''', (fs['id'],)):
+                md = dict(m)
+                md['metrics'] = json.loads(md['metrics'])
+                d['models'].append(md)
+            d['active_model_id'] = _active_model_id(conn, fs['id'])
+            d['offset'] = _fair_offset(conn, fs['id'])
+            out.append(d)
+    return out
 
 
 def save_predictions(model_id: int, predictions: dict[int, float]) -> None:
@@ -573,39 +667,51 @@ def save_predictions(model_id: int, predictions: dict[int, float]) -> None:
 
 
 def get_fair_price_map() -> dict[int, dict]:
-    """{listing_id: {fair_price, features, per}} from each feature set's newest model."""
+    """{listing_id: {fair_price, raw, features, per}} from each feature set's active model.
+    `fair_price` includes the manual offset, `raw` is the pure ML prediction."""
+    out = {}
     with get_db() as conn:
-        rows = conn.execute('''
-            SELECT fp.listing_id, fp.fair_price, lf.data, m.metrics
-            FROM fair_prices fp
-            JOIN ml_models m ON m.id = fp.model_id
-            LEFT JOIN listing_features lf ON lf.listing_id = fp.listing_id
-                                         AND lf.feature_set_id = m.feature_set_id
-            WHERE m.id = (SELECT MAX(id) FROM ml_models WHERE feature_set_id = m.feature_set_id)''').fetchall()
-    return {r['listing_id']: {'fair_price': r['fair_price'],
-                              'features': json.loads(r['data']) if r['data'] else {},
-                              'per': json.loads(r['metrics']).get('per')} for r in rows}
+        for fs in conn.execute('SELECT id FROM feature_sets').fetchall():
+            mid = _active_model_id(conn, fs['id'])
+            if not mid:
+                continue
+            factor = 1 + _fair_offset(conn, fs['id']) / 100
+            for r in conn.execute('''
+                    SELECT fp.listing_id, fp.fair_price, lf.data, m.metrics
+                    FROM fair_prices fp
+                    JOIN ml_models m ON m.id = fp.model_id
+                    LEFT JOIN listing_features lf ON lf.listing_id = fp.listing_id
+                                                 AND lf.feature_set_id = m.feature_set_id
+                    WHERE m.id = ?''', (mid,)):
+                out[r['listing_id']] = {'fair_price': r['fair_price'] * factor, 'raw': r['fair_price'],
+                                        'features': json.loads(r['data']) if r['data'] else {},
+                                        'per': json.loads(r['metrics']).get('per')}
+    return out
 
 
 def get_fair_price(listing_id: int) -> dict | None:
-    import json
     with get_db() as conn:
-        r = conn.execute('''
-            SELECT fp.fair_price, fp.oof, fp.predicted_at, m.algo, m.trained_at, m.n_train, m.metrics,
-                   fs.name AS feature_set, lf.data AS features, fs.definition
+        rows = conn.execute('''
+            SELECT fp.fair_price, fp.oof, fp.predicted_at, m.id AS model_id, m.algo, m.trained_at,
+                   m.n_train, m.metrics, fs.id AS fs_id, fs.name AS feature_set,
+                   lf.data AS features, fs.definition
             FROM fair_prices fp
             JOIN ml_models m ON m.id = fp.model_id
             JOIN feature_sets fs ON fs.id = m.feature_set_id
             LEFT JOIN listing_features lf ON lf.listing_id = fp.listing_id
                                          AND lf.feature_set_id = fs.id
-            WHERE fp.listing_id = ? ORDER BY m.trained_at DESC, m.id DESC LIMIT 1''',
-                         (listing_id,)).fetchone()
+            WHERE fp.listing_id = ?''', (listing_id,)).fetchall()
+        r = next((x for x in rows if x['model_id'] == _active_model_id(conn, x['fs_id'])), None)
+        offset = _fair_offset(conn, r['fs_id']) if r else 0.0
     if not r:
         return None
     d = dict(r)
     d['metrics'] = json.loads(d['metrics'])
     d['features'] = json.loads(d['features']) if d['features'] else {}
     d['definition'] = json.loads(d['definition'])
+    d['raw'] = d['fair_price']
+    d['offset'] = offset
+    d['fair_price'] = d['raw'] * (1 + offset / 100)
     return d
 
 

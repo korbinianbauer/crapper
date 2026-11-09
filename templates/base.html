@@ -72,6 +72,7 @@
   <a class="brand" href="/"><span class="crap">crap</span>per</a>
   <span class="sub" style="flex:1;">Preis-Tracker für Kleinanzeigen, ImmoScout & mehr</span>
   {% if session.logged_in %}
+  <a class="btn btn-outline btn-sm" href="{{ url_for('settings_index') }}">Settings</a>
   <form method="post" action="{{ url_for('logout') }}" style="margin:0;">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <button class="btn btn-outline btn-sm" type="submit">Sign out</button>
