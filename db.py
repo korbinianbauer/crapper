@@ -532,8 +532,26 @@ def get_training_rows(feature_set_id: int) -> list[dict]:
                    (SELECT price FROM price_history WHERE listing_id = lf.listing_id
                       AND price IS NOT NULL ORDER BY observed_at DESC, id DESC LIMIT 1) AS price
             FROM listing_features lf WHERE lf.feature_set_id = ?''', (feature_set_id,)).fetchall()
-    return [{'listing_id': r['listing_id'], 'features': json.loads(r['data']), 'price': r['price']}
-            for r in rows]
+    out = []
+    for r in rows:
+        data = json.loads(r['data'])
+        out.append({'listing_id': r['listing_id'], 'price': r['price'], 'cost': data.get('_cost'),
+                    'features': {k: v for k, v in data.items() if not k.startswith('_')}})
+    return out
+
+
+def get_cost_assumptions(feature_set_id: int) -> dict:
+    """Monthly € assumptions used to normalise rents (see ml.effective_price)."""
+    import ml
+    r = get_setting(f'fair_cost_{feature_set_id}', '')
+    try:
+        return {**ml.DEFAULT_COSTS, **json.loads(r)} if r else dict(ml.DEFAULT_COSTS)
+    except ValueError:
+        return dict(ml.DEFAULT_COSTS)
+
+
+def set_cost_assumptions(feature_set_id: int, values: dict):
+    set_setting(f'fair_cost_{feature_set_id}', json.dumps(values))
 
 
 KEEP_MODELS = 10          # trained models kept per feature set (the active one is never pruned)
@@ -683,9 +701,12 @@ def get_fair_price_map() -> dict[int, dict]:
                     LEFT JOIN listing_features lf ON lf.listing_id = fp.listing_id
                                                  AND lf.feature_set_id = m.feature_set_id
                     WHERE m.id = ?''', (mid,)):
+                data = json.loads(r['data']) if r['data'] else {}
+                met = json.loads(r['metrics'])
                 out[r['listing_id']] = {'fair_price': r['fair_price'] * factor, 'raw': r['fair_price'],
-                                        'features': json.loads(r['data']) if r['data'] else {},
-                                        'per': json.loads(r['metrics']).get('per')}
+                                        'features': {k: v for k, v in data.items() if not k.startswith('_')},
+                                        'cost': data.get('_cost'), 'assume': met.get('cost_assumptions'),
+                                        'per': met.get('per'), 'per_range': met.get('per_range')}
     return out
 
 
@@ -707,7 +728,9 @@ def get_fair_price(listing_id: int) -> dict | None:
         return None
     d = dict(r)
     d['metrics'] = json.loads(d['metrics'])
-    d['features'] = json.loads(d['features']) if d['features'] else {}
+    data = json.loads(d['features']) if d['features'] else {}
+    d['features'] = {k: v for k, v in data.items() if not k.startswith('_')}
+    d['cost'] = data.get('_cost')
     d['definition'] = json.loads(d['definition'])
     d['raw'] = d['fair_price']
     d['offset'] = offset

@@ -39,10 +39,6 @@
 
   <div>
     <h2>Fair-Pricing-Modell</h2>
-    {% if not sets %}
-    <div class="card muted">Noch kein Feature-Set vorhanden. Features werden per LLM-Agent eingetragen
-      (siehe CLAUDE.md); danach kann hier ein Modell trainiert werden.</div>
-    {% endif %}
 
     {% for fs in sets %}
     <div class="card fs" data-fs="{{ fs.id }}">
@@ -102,6 +98,27 @@
         {% endif %}
       </section>
 
+      {% if fs.has_costs %}
+      <section>
+        <h3>Normierte Warmmiete (Kostenannahmen)</h3>
+        <form method="post" action="{{ url_for('settings_set_costs', fs_id=fs.id) }}">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+          <div class="row">
+            {% for key, label in cost_fields %}
+            <div class="fld"><label for="c{{ fs.id }}{{ key }}">{{ label }}</label>
+              <input id="c{{ fs.id }}{{ key }}" name="{{ key }}" inputmode="decimal" value="{{ '%g'|format(fs.costs[key]) }}"></div>
+            {% endfor %}
+            <button class="btn btn-primary" type="submit">Speichern</button>
+          </div>
+        </form>
+        <div class="hint">Mietangebote werden immer als <b>Warmmiete inkl. Heizung, Strom, Internet, Wasser, Müllabfuhr und
+          einem PKW-Stellplatz</b> verglichen. Je Anzeige ist hinterlegt, welche dieser Posten im Preis stehen und welche nicht;
+          fehlende Posten werden mit diesen Beträgen aufgeschlagen (ein extra ausgewiesener Stellplatzpreis ersetzt den
+          Pauschalbetrag). Das Modell wird auf dieser normierten Miete trainiert und jedes Modell merkt sich die Annahmen,
+          mit denen es trainiert wurde – Änderungen wirken daher ab dem <b>nächsten Training</b>.</div>
+      </section>
+      {% endif %}
+
       <section>
         <h3>Offset der Anzeige</h3>
         <form method="post" action="{{ url_for('settings_set_offset', fs_id=fs.id) }}" class="row">
@@ -121,6 +138,23 @@
       </section>
     </div>
     {% endfor %}
+
+    {% if without %}
+    <div class="card fs">
+      <h2>Tracker ohne Feature-Set</h2>
+      <div class="hint" style="margin-top:0;">Für diese Tracker kann hier noch kein Modell trainiert werden: Es fehlen die
+        Merkmals-Definition und die Merkmalswerte der Anzeigen. Beides legt ein LLM-Agent von Hand an (siehe CLAUDE.md,
+        Abschnitt „ML fair price“). Danach erscheint der Tracker oben, und ab 30 Anzeigen mit Features lässt sich ein Modell
+        trainieren.</div>
+      <table class="models" style="margin-top:.75rem;">
+        <tr><th>Tracker</th><th>Quelle</th><th>Anzeigen</th></tr>
+        {% for t in without %}
+        <tr><td><a href="{{ url_for('index', tracker_id=t.id) }}" style="color:var(--text);">#{{ t.id }} {{ t.label or t.url }}</a></td>
+            <td>{{ t.source }}</td><td>{{ t.listing_count }}</td></tr>
+        {% endfor %}
+      </table>
+    </div>
+    {% endif %}
   </div>
 </div>
 {% endblock %}

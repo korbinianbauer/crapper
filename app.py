@@ -279,11 +279,15 @@ def index(tracker_id):
         types = (l['tracker_types'] or '').split(',')
         fair = fair_map.get(l['id'])
         price_num = latest_num['price'] if latest_num else None
-        fair_price = fair_delta = None
+        fair_price = fair_delta = eff_price = None
         if fair:
             fair_price = round(fair['fair_price'])
-            if price_num and ml.is_plausible(price_num, fair['features'], fair['per']):
-                fair_delta = round((price_num / fair['fair_price'] - 1) * 100)   # + = above fair
+            # rents are compared as normalised Warmmiete (incl. Heizung, Strom, Internet, … see ml.effective_price)
+            eff = ml.effective_price(price_num, fair.get('cost'), fair['features'], fair.get('assume'))
+            if eff is not None and price_num and eff != price_num:
+                eff_price = round(eff)
+            if price_num and ml.is_plausible(price_num, fair['features'], fair['per'], fair.get('per_range')):
+                fair_delta = round((eff / fair['fair_price'] - 1) * 100)   # + = above fair
         cards[l['id']] = {
             'id': l['id'],
             'source': l['source'],
@@ -306,6 +310,7 @@ def index(tracker_id):
             'current_price_num': price_num,
             'fair_price': fair_price,
             'fair_delta': fair_delta,
+            'eff_price': eff_price,
             'history': [
                 {'t': h['observed_at'], 'price': h['price'], 'label': h['price_text']}
                 for h in hist
@@ -446,8 +451,13 @@ def listing_archive(listing_id):
     if fair:
         cur_price = next((p['price'] for p in reversed(prices) if p['price'] is not None), None)
         fair['current'] = cur_price
-        fair['plausible'] = ml.is_plausible(cur_price, fair['features'], fair['metrics'].get('per'))
-        fair['delta_pct'] = round((cur_price / fair['fair_price'] - 1) * 100) if cur_price else None
+        fair['plausible'] = ml.is_plausible(cur_price, fair['features'], fair['metrics'].get('per'), fair['metrics'].get('per_range'))
+        fair['eff'], fair['eff_parts'] = ml.effective_breakdown(cur_price, fair.get('cost'), fair['features'],
+                                                               fair['metrics'].get('cost_assumptions'))
+        if not fair['eff_parts']:
+            fair['eff'] = None
+        base = fair['eff'] or cur_price
+        fair['delta_pct'] = round((base / fair['fair_price'] - 1) * 100) if base else None
         m = fair['metrics']
         fair['mae'] = m['candidates'][m['chosen']]['mae']
         fair['median_ape'] = round(m['candidates'][m['chosen']]['median_ape'] * 100)
@@ -677,11 +687,11 @@ def _fair_stats(fs: dict, fair_map: dict) -> dict:
     """How the asking prices of the feature set's listings relate to the *raw* ML prediction
     (median price / prediction - 1, in %) — the number to look at when choosing an offset."""
     ratios = []
-    per = (fs['models'][0]['metrics'].get('per') if fs['models'] else None)
+    m0 = fs['models'][0]['metrics'] if fs['models'] else {}
     for r in db.get_training_rows(fs['id']):
         f = fair_map.get(r['listing_id'])
-        if f and r['price'] and ml.is_plausible(r['price'], r['features'], per):
-            ratios.append(r['price'] / f['raw'])
+        if f and r['price'] and ml.is_plausible(r['price'], r['features'], m0.get('per'), m0.get('per_range')):
+            ratios.append(ml.effective_price(r['price'], r.get('cost'), r['features'], f.get('assume')) / f['raw'])
     if not ratios:
         return {}
     return {'n': len(ratios), 'median_pct': round((statistics.median(ratios) - 1) * 100, 1)}
@@ -695,11 +705,17 @@ def settings_fair_pricing():
     for fs in sets:
         fs['train'] = _trainings.get(fs['id'])
         fs['stats'] = _fair_stats(fs, fair_map)
+        fs['has_costs'] = any(r.get('cost') for r in db.get_training_rows(fs['id']))
+        fs['costs'] = db.get_cost_assumptions(fs['id'])
         for m in fs['models']:
             c = m['metrics']['candidates'][m['metrics']['chosen']]
             m['mae'], m['median_ape'], m['r2'] = round(c['mae']), round(c['median_ape'] * 100, 1), c['r2']
-    return render_template('settings_fair_pricing.html', sets=sets, pages=SETTINGS_PAGES,
-                           page='fair_pricing')
+    counts = db.get_tracker_listing_counts()
+    with_fs = {fs['tracker_id'] for fs in sets}
+    without = [dict(t, listing_count=counts.get(t['id'], 0)) for t in db.get_trackers()
+               if t['id'] not in with_fs]
+    return render_template('settings_fair_pricing.html', sets=sets, without=without, cost_fields=COST_FIELDS,
+                           pages=SETTINGS_PAGES, page='fair_pricing')
 
 
 @app.route('/settings/fair-pricing/status')
@@ -751,6 +767,32 @@ def settings_select_model(fs_id):
     except SystemExit as e:
         flash(str(e), 'error')
     flash(f'Modell {model_id} wird jetzt für den fairen Preis verwendet.', 'ok')
+    return redirect(url_for('settings_fair_pricing'))
+
+
+COST_FIELDS = [('strom', 'Strom (€/Monat)'), ('internet', 'Internet (€/Monat)'), ('stellplatz', 'PKW-Stellplatz (€/Monat)'),
+               ('wasser', 'Wasser (€/Monat)'), ('muell', 'Müllabfuhr (€/Monat)'),
+               ('heizung_m2', 'Heizung, falls nicht enthalten (€/m²)'), ('nk_m2', 'Nebenkosten bei unbekannter Höhe (€/m²)')]
+
+
+@app.route('/settings/fair-pricing/<int:fs_id>/costs', methods=['POST'])
+@login_required
+@csrf_protect
+def settings_set_costs(fs_id):
+    if not db.get_feature_set_by_id(fs_id):
+        abort(404)
+    vals = {}
+    for key, _ in COST_FIELDS:
+        try:
+            v = float(request.form.get(key, '').strip().replace(',', '.'))
+        except ValueError:
+            v = math.nan
+        if not math.isfinite(v) or not 0 <= v <= 1000:
+            flash('Alle Kostenannahmen müssen Zahlen zwischen 0 und 1000 sein.', 'error')
+            return redirect(url_for('settings_fair_pricing'))
+        vals[key] = round(v, 2)
+    db.set_cost_assumptions(fs_id, vals)
+    flash('Kostenannahmen gespeichert – sie gelten ab dem nächsten Training.', 'ok')
     return redirect(url_for('settings_fair_pricing'))
 
 

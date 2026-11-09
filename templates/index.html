@@ -365,7 +365,8 @@ function ratingHtml(c) {
   const cls = d <= -10 ? 'cheap' : d >= 10 ? 'dear' : '';
   const txt = d <= -10 ? `${-d} % unter fair` : d >= 10 ? `${d} % über fair`
             : `fair (${d > 0 ? '+' : ''}${d} %)`;
-  return `<div class="rating"><b class="${cls}">${txt}</b> · Fairer Preis ${fair}</div>`;
+  const eff = c.eff_price ? ` title="Normierte Warmmiete ${c.eff_price.toLocaleString('de-DE')} € (inkl. Heizung, Strom, Internet, Wasser, Müll, Stellplatz)"` : '';
+  return `<div class="rating"${eff}><b class="${cls}">${txt}</b> · Fairer Preis ${fair}</div>`;
 }
 
 function listingCardHtml(c) {

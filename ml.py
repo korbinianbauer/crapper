@@ -24,7 +24,52 @@ import db
 MIN_TRAIN = 30                      # refuse to train on fewer priced listings
 # Plausible €/unit window for target-price sanity filtering, keyed by feature-set
 # `price_per` (a numeric feature the price is normally proportional to).
-SANE_PER_UNIT = {'wohnflaeche': (4.0, 40.0)}
+SANE_PER_UNIT = {'wohnflaeche': (4.0, 40.0)}      # default (rent); a feature set can override via definition['plausible']
+
+
+# ── normalised rent ("Warmmiete inkl. Heizung, Strom, Internet, Wasser, Müll, 1 PKW-Stellplatz") ──
+# Per listing the LLM agent stores `_cost` next to the features:
+#   {"basis": "kalt"|"warm", "add": € NK+Heizung on top of the price (basis kalt; null = unknown),
+#    "incl": ["strom","internet","stellplatz"] already contained in price(+add),
+#    "extra": ["heizung","wasser","muell"] NOT contained although normally part of the NK,
+#    "sp": monthly price of a parking space if it is rented separately}
+# Missing items are added with the feature set's assumptions (settings page), so every listing is
+# compared on the same footing. The model is trained on this normalised price.
+DEFAULT_COSTS = {'strom': 50.0, 'internet': 30.0, 'stellplatz': 60.0, 'wasser': 25.0, 'muell': 10.0,
+                 'heizung_m2': 1.5, 'nk_m2': 3.0}
+COST_LABELS = {'strom': 'Strom', 'internet': 'Internet', 'stellplatz': 'PKW-Stellplatz', 'wasser': 'Wasser',
+               'muell': 'Müllabfuhr', 'heizung': 'Heizung'}
+
+
+def effective_breakdown(price, cost, features, assume):
+    """(total, [(label, €)]) — the normalised monthly rent, or (price, []) without cost data."""
+    if not cost or price is None or not assume:
+        return price, []
+    a = {**DEFAULT_COSTS, **assume}
+    wf = (features or {}).get('wohnflaeche') or 0
+    parts = [('Angebotspreis', price)]
+    add = cost.get('add')
+    if cost.get('basis') == 'kalt':
+        if add is None:
+            parts.append(('Nebenkosten (geschätzt)', round(a['nk_m2'] * wf)))
+        elif add:
+            parts.append(('Nebenkosten/Heizung lt. Anzeige', add))
+    incl, extra = set(cost.get('incl') or []), set(cost.get('extra') or [])
+    for k in ('strom', 'internet', 'stellplatz'):
+        if k in incl:
+            continue
+        amt = cost.get('sp') if k == 'stellplatz' and cost.get('sp') is not None else a[k]
+        parts.append((COST_LABELS[k] + ' (zzgl.)', amt))
+    if 'heizung' in extra:
+        parts.append(('Heizung (zzgl.)', round(a['heizung_m2'] * wf)))
+    for k in ('wasser', 'muell'):
+        if k in extra:
+            parts.append((COST_LABELS[k] + ' (zzgl.)', a[k]))
+    return sum(v for _, v in parts), parts
+
+
+def effective_price(price, cost, features, assume):
+    return effective_breakdown(price, cost, features, assume)[0]
 
 
 class Encoder:
@@ -91,18 +136,18 @@ def _candidates():
     }
 
 
-def _sane(row, per):
+def _sane(row, per, rng=None):
     p = row['price']
     if not p or p <= 0:
         return False
     if per:
         base = row['features'].get(per)
-        lo, hi = SANE_PER_UNIT.get(per, (0, math.inf))
+        lo, hi = rng or SANE_PER_UNIT.get(per, (0, math.inf))
         return bool(base) and lo <= p / base <= hi
     return True
 
 
-def train(feature_set_name: str, per: str | None = 'wohnflaeche', activate: bool = True) -> dict:
+def train(feature_set_name: str, per: str | None = None, activate: bool = True) -> dict:
     import joblib
     from sklearn.model_selection import KFold, cross_val_predict
 
@@ -110,8 +155,17 @@ def train(feature_set_name: str, per: str | None = 'wohnflaeche', activate: bool
     if not fs:
         raise SystemExit(f'unknown feature set {feature_set_name!r}')
     features = fs['definition']['features']
+    # plausibility window (€ per unit of `per`, e.g. €/m²): from the feature set, else rent default
+    pl = fs['definition'].get('plausible') or {}
+    per = per or pl.get('per') or 'wohnflaeche'
+    rng = (pl['min'], pl['max']) if pl.get('per') == per and 'min' in pl else None
     rows = db.get_training_rows(fs['id'])
-    train_rows = [r for r in rows if _sane(r, per)]
+    # rows with cost data are trained on the normalised rent (see effective_price)
+    assume = db.get_cost_assumptions(fs['id']) if any(r.get('cost') for r in rows) else None
+    for r in rows:
+        r['raw_price'] = r['price']
+        r['price'] = effective_price(r['price'], r.get('cost'), r['features'], assume) if r['price'] else r['price']
+    train_rows = [r for r in rows if _sane({**r, 'price': r['raw_price']}, per, rng)]
     if len(train_rows) < MIN_TRAIN:
         raise SystemExit(f'only {len(train_rows)} usable priced listings (<{MIN_TRAIN})')
 
@@ -146,7 +200,7 @@ def train(feature_set_name: str, per: str | None = 'wohnflaeche', activate: bool
             np.exp(model.predict(enc.transform([r['features']]))[0]))
 
     imp = _importances(model, best, X, y, enc.names)
-    metrics = {'chosen': best, 'per': per, 'candidates': scores, 'n_features': len(enc.names),
+    metrics = {'chosen': best, 'per': per, 'per_range': rng, 'cost_assumptions': assume, 'candidates': scores, 'n_features': len(enc.names),
                'n_excluded': len(rows) - len(train_rows), 'importance': imp}
     buf = io.BytesIO()
     joblib.dump({'encoder': enc, 'model': model, 'algo': best}, buf)
@@ -160,8 +214,8 @@ def train(feature_set_name: str, per: str | None = 'wohnflaeche', activate: bool
     return metrics
 
 
-def is_plausible(price, features, per) -> bool:
-    return _sane({'price': price, 'features': features}, per)
+def is_plausible(price, features, per, rng=None) -> bool:
+    return _sane({'price': price, 'features': features}, per, tuple(rng) if rng else None)
 
 
 def _load_artifact(blob: bytes) -> dict:
