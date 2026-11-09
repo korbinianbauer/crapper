@@ -40,6 +40,12 @@
   .listing .tracker-tag { font-size:.7rem; color:var(--muted); }
   .actions { display:flex; gap:.4rem; }
 
+  .rating { font-size:.8rem; color:var(--muted); margin:.1rem 0 .3rem; }
+  .rating b { font-weight:700; color:var(--text); } .rating b.cheap { color:var(--primary); } .rating b.dear { color:var(--danger); }
+  #sortbar { display:none; align-items:center; gap:.4rem; margin-left:auto; font-size:.85rem; color:var(--muted); }
+  #sortbar button { white-space:nowrap; }
+  #sortbar select { background:var(--surface-2); color:var(--text); border:1px solid var(--border);
+                    border-radius:8px; padding:.3rem .5rem; font:inherit; }
   .modal-bg { display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:50;
               align-items:center; justify-content:center; }
   .modal-bg.open { display:flex; }
@@ -192,6 +198,14 @@
       <span id="gone-label"></span>
     </label>
     <h2 id="detail-title" style="margin:0; font-size:1.1rem;"></h2>
+    <div id="sortbar">Sortieren:
+      <select id="sort-key" onchange="setSortKey(this.value)">
+        <option value="date">Datum (erstmals gesehen)</option>
+        <option value="price">Preis</option>
+        <option value="rating">Preisbewertung</option>
+      </select>
+      <button class="btn btn-outline btn-sm" id="sort-dir" onclick="toggleSortDir()"></button>
+    </div>
   </div>
   <div class="grid" id="detail-grid"></div>
 </div>
@@ -341,6 +355,19 @@ function esc(s) {
   return d.innerHTML;
 }
 
+// Asking price vs. ML fair price: negative = cheaper than fair.
+function ratingHtml(c) {
+  if (c.fair_price == null) return '';
+  const fair = c.fair_price.toLocaleString('de-DE') + ' €';
+  if (c.fair_delta == null)
+    return `<div class="rating" title="Preis nicht plausibel – keine Einordnung">Fairer Preis ${fair}</div>`;
+  const d = c.fair_delta;
+  const cls = d <= -10 ? 'cheap' : d >= 10 ? 'dear' : '';
+  const txt = d <= -10 ? `${-d} % unter fair` : d >= 10 ? `${d} % über fair`
+            : `fair (${d > 0 ? '+' : ''}${d} %)`;
+  return `<div class="rating"><b class="${cls}">${txt}</b> · Fairer Preis ${fair}</div>`;
+}
+
 function listingCardHtml(c) {
   const imgSrc = c.image_file ? '/archive/img/' + c.image_file : c.image_url;
   const thumb = imgSrc
@@ -370,6 +397,7 @@ function listingCardHtml(c) {
       </div>
     </div>
     <div class="row"><span class="price">${esc(c.current_price)}</span> ${badge}</div>
+    ${ratingHtml(c)}
     <div class="chart" id="chart-${c.id}"></div>
     ${hide}
   </div>`;
@@ -415,6 +443,45 @@ function observeCharts(cards) {
 let currentTrackerId = null;
 function showGoneFromUrl() { return new URLSearchParams(location.search).get('gone') === '1'; }
 
+// Sorting (URL: ?sort=date|price|rating&dir=asc|desc). Listings without a value
+// (no numeric price / no fair price) always go last. rating = deviation from the fair
+// price, so ascending = cheapest relative to fair first.
+const SORT_DEFAULT_DIR = {date: 'desc', price: 'asc', rating: 'asc'};
+const SORT_VALUE = {
+  date:   c => c.first_seen,
+  price:  c => c.current_price_num,
+  rating: c => c.fair_delta,
+};
+function sortState() {
+  const p = new URLSearchParams(location.search);
+  const key = SORT_VALUE[p.get('sort')] ? p.get('sort') : 'date';
+  const dir = ['asc', 'desc'].includes(p.get('dir')) ? p.get('dir') : SORT_DEFAULT_DIR[key];
+  return {key, dir};
+}
+function setParams(changes) {
+  const p = new URLSearchParams(location.search);
+  for (const [k, v] of Object.entries(changes)) { if (v == null) p.delete(k); else p.set(k, v); }
+  const q = p.toString();
+  history.replaceState(history.state, '', location.pathname + (q ? '?' + q : ''));
+}
+function setSortKey(key) { setParams({sort: key === 'date' ? null : key, dir: null}); showTracker(currentTrackerId); }
+function toggleSortDir() {
+  const {key, dir} = sortState();
+  const next = dir === 'asc' ? 'desc' : 'asc';
+  setParams({dir: next === SORT_DEFAULT_DIR[key] ? null : next});
+  showTracker(currentTrackerId);
+}
+function sortCards(cards) {
+  const {key, dir} = sortState(), val = SORT_VALUE[key], m = dir === 'asc' ? 1 : -1;
+  return cards.slice().sort((a, b) => {
+    const x = val(a), y = val(b);
+    if (x == null && y == null) return 0;
+    if (x == null) return 1;
+    if (y == null) return -1;
+    return x < y ? -m : x > y ? m : 0;
+  });
+}
+
 function showTracker(id) {
   const t = TRACKERS.find(x => x.id === id);
   if (!t) return false;
@@ -422,7 +489,11 @@ function showTracker(id) {
   const all = t.listing_ids.map(i => CARDS[i]).filter(Boolean);
   const stale = all.filter(c => c.stale_gone).length;
   const showGone = showGoneFromUrl();
-  const cards = showGone ? all : all.filter(c => !c.stale_gone);
+  const cards = sortCards(showGone ? all : all.filter(c => !c.stale_gone));
+  const ss = sortState();
+  document.getElementById('sortbar').style.display = 'flex';
+  document.getElementById('sort-key').value = ss.key;
+  document.getElementById('sort-dir').textContent = ss.dir === 'asc' ? '↑ aufsteigend' : '↓ absteigend';
   detailTitle.textContent = t.label + ' — ' + cards.length + ' Anzeigen';
   const tog = document.getElementById('gone-toggle');
   tog.style.display = stale ? '' : 'none';
@@ -441,12 +512,13 @@ function showTracker(id) {
 }
 
 function toggleGone(on) {
-  history.replaceState(history.state, '', location.pathname + (on ? '?gone=1' : ''));
+  setParams({gone: on ? '1' : null});
   showTracker(currentTrackerId);
 }
 
 function showOverview() {
   detail.style.display = 'none';
+  document.getElementById('sortbar').style.display = 'none';
   overview.style.display = '';
   detailGrid.innerHTML = '';
   document.title = BASE_TITLE;

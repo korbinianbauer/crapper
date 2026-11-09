@@ -125,7 +125,7 @@ def extract(title, location, desc):
     f['befristet'] = has(t, r'befristet|auf zeit|zwischenmiete|zwischenvermietung|\bTage?\b.{0,12}\bmonate?\b|ferienwohnung|zeitmiete')
     f['tausch'] = has(t, r'tauschwohnung|wohnungstausch|nur tausch|tausch\b')
     f['gewerblich'] = ('Anbieter-Objekt-ID' in d) or has(t, r'provision(?!sfrei)|courtage|\bGmbH\b|hausverwaltung|immobilien(?!\w)|verantwortliche maklerin|\bKG\b')
-    f['wg'] = has(t, r'\bWG\b|wohngemeinschaft|untermiete|zimmer zu vermieten|mitbewohner|\bwohnen gegen')
+    f['wg'] = has(t, r'wg-zimmer|zimmer in [^.\n]{0,25}\bwg\b|\bwg\b(?= (sucht|zimmer))|wohngemeinschaft(?! geeignet)|untermiete|zimmer zu vermieten|mitbewohner|\bwohnen gegen')
     f['aussicht'] = has(t, r'seeblick|bergblick|alpenblick|panorama|blick auf (den )?(see|berge|alpen)|traumblick|fernblick')
     f['barrierefrei'] = has(t, r'barrierefrei|rollstuhl')
     f['fussbodenheizung'] = has(t, r'fu(ß|ss)bodenheizung')

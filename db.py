@@ -572,6 +572,21 @@ def save_predictions(model_id: int, predictions: dict[int, float]) -> None:
                          [(lid, model_id, p, now) for lid, p in predictions.items()])
 
 
+def get_fair_price_map() -> dict[int, dict]:
+    """{listing_id: {fair_price, features, per}} from each feature set's newest model."""
+    with get_db() as conn:
+        rows = conn.execute('''
+            SELECT fp.listing_id, fp.fair_price, lf.data, m.metrics
+            FROM fair_prices fp
+            JOIN ml_models m ON m.id = fp.model_id
+            LEFT JOIN listing_features lf ON lf.listing_id = fp.listing_id
+                                         AND lf.feature_set_id = m.feature_set_id
+            WHERE m.id = (SELECT MAX(id) FROM ml_models WHERE feature_set_id = m.feature_set_id)''').fetchall()
+    return {r['listing_id']: {'fair_price': r['fair_price'],
+                              'features': json.loads(r['data']) if r['data'] else {},
+                              'per': json.loads(r['metrics']).get('per')} for r in rows}
+
+
 def get_fair_price(listing_id: int) -> dict | None:
     import json
     with get_db() as conn:

@@ -266,6 +266,7 @@ def index(tracker_id):
     listings = db.get_all_listings()
     history = db.get_price_history_map()
     memberships = db.get_tracker_memberships()
+    fair_map = db.get_fair_price_map()
 
     source_names = {s.name: s.display_name for s in sources.all_sources()}
 
@@ -276,6 +277,13 @@ def index(tracker_id):
         latest = next((h for h in reversed(hist) if h['price_text']), None)
         latest_num = next((h for h in reversed(hist) if h['price'] is not None), None)
         types = (l['tracker_types'] or '').split(',')
+        fair = fair_map.get(l['id'])
+        price_num = latest_num['price'] if latest_num else None
+        fair_price = fair_delta = None
+        if fair:
+            fair_price = round(fair['fair_price'])
+            if price_num and ml.is_plausible(price_num, fair['features'], fair['per']):
+                fair_delta = round((price_num / fair['fair_price'] - 1) * 100)   # + = above fair
         cards[l['id']] = {
             'id': l['id'],
             'source': l['source'],
@@ -295,7 +303,9 @@ def index(tracker_id):
             'first_seen': l['first_seen'],
             'last_seen': l['last_seen'],
             'current_price': latest['price_text'] if latest else '—',
-            'current_price_num': latest_num['price'] if latest_num else None,
+            'current_price_num': price_num,
+            'fair_price': fair_price,
+            'fair_delta': fair_delta,
             'history': [
                 {'t': h['observed_at'], 'price': h['price'], 'label': h['price_text']}
                 for h in hist
