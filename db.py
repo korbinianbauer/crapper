@@ -147,7 +147,25 @@ def init_db():
             SELECT id, 1, last_seen, title, location, image_url, '[]', 'legacy'
               FROM listings l
              WHERE NOT EXISTS (SELECT 1 FROM listing_versions v WHERE v.listing_id = l.id)''')
+        _prune_phantom_versions(conn)
         _init_default_settings(conn)
+
+
+def _prune_phantom_versions(conn):
+    """Remove versions created by search cards after a full page was archived, and
+    consecutive full-page versions with identical content (flip-flop leftovers)."""
+    conn.execute('''DELETE FROM listing_versions
+                    WHERE raw_html IS NULL AND EXISTS (
+                      SELECT 1 FROM listing_versions o
+                       WHERE o.listing_id = listing_versions.listing_id
+                         AND o.raw_html IS NOT NULL AND o.version < listing_versions.version)''')
+    prev = {}
+    for r in conn.execute('''SELECT id, listing_id, content_hash FROM listing_versions
+                             WHERE raw_html IS NOT NULL ORDER BY listing_id, version''').fetchall():
+        if r['content_hash'] != 'legacy' and prev.get(r['listing_id']) == r['content_hash']:
+            conn.execute('DELETE FROM listing_versions WHERE id = ?', (r['id'],))
+        else:
+            prev[r['listing_id']] = r['content_hash']
 
 
 def _add_columns_if_missing(conn, table: str, columns: dict[str, str]):
@@ -346,6 +364,11 @@ def _record_version(conn, lid, seen_at, title, location, description, image_url,
         description = description or last['description']
         image_url = image_url or last['image_url']
     images = [u for u in (images or []) if _clean_img(u)]
+    if not raw_html and conn.execute(
+            'SELECT 1 FROM listing_versions WHERE listing_id = ? AND raw_html IS NOT NULL',
+            (lid,)).fetchone():
+        return     # a search card never makes a version once a full page is archived: its
+                   # fields differ slightly from the full page and would flip-flop
     h = hashlib.sha256(json.dumps(
         [title, location, description, image_url], ensure_ascii=False).encode()).hexdigest()
     last_hash = last['content_hash'] if last else None

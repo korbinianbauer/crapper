@@ -326,6 +326,7 @@ def listing_archive(listing_id):
     if not listing:
         abort(404)
     versions = sorted(db.get_versions(listing_id), key=lambda v: v['version'])
+    versions = [v for v in versions if v['has_html']] or versions   # snapshots = stored pages
     if not versions:
         abort(404)
     want = request.args.get('v', type=int)
