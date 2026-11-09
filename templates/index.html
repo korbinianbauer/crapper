@@ -140,16 +140,6 @@
   <span><b style="color:var(--danger);">{{ gone_count }}</b> disappeared</span>
 </div>
 
-{% if global_trend %}
-<div class="card" style="padding:.8rem 1rem; margin-bottom:1rem;">
-  <div style="font-weight:600;">Preisindex (alle Anzeigen)
-    <span class="muted" style="font-weight:400; font-size:.8rem;">
-      aktuell {{ '%.1f'|format(global_trend[-1].index * 100) }} · Start = 100, verkettet, ohne Neuzugangs-Sprünge</span>
-    {% if global_median is not none %}<span style="float:right; font-weight:400; font-size:.85rem;" title="Median der aktuellen Preise aktiver Anzeigen (Preisniveau)">Median aktiv <b>{{ '%.0f'|format(global_median) }} €</b></span>{% endif %}</div>
-  <div class="chart" id="global-index"></div>
-</div>
-{% endif %}
-
 {% if not tracker_cards %}
 <div class="card" style="text-align:center; padding:3rem;">
   <p class="muted">No trackers yet.{% if session.logged_in %} Add a listing URL or a search above.{% endif %}</p>
@@ -178,6 +168,7 @@
     </div>
 
     <div class="chart" id="tchart-{{ t.id }}"></div>
+    <div class="hint" style="margin:0;"><span style="color:#3b82f6;">━</span> Preisindex (links) · <span style="color:#f59e0b;">━</span> Medianpreis (rechts)</div>
     <div class="hint">Klicken für Einzelanzeigen →</div>
   </div>
   {% endfor %}
@@ -221,7 +212,6 @@
 {% block scripts %}
 <script>
 const CARDS = {{ cards|tojson }};            // {listing_id: card}
-const GLOBAL_TREND = {{ global_trend|tojson }};
 const TRACKERS = {{ tracker_cards|tojson }}; // overview cards
 const REFRESHING = {{ refreshing|tojson }};
 const CSRF = '{{ csrf_token() }}';
@@ -283,8 +273,9 @@ function renderListingChart(c) {
   }), CHART_CFG);
 }
 
-// Chain-linked price index (100 = start of tracking), daily points up to today.
-function renderIndexChart(el, trend, big) {
+// Price index (chain-linked, 100 = start; left axis) and median price of the
+// listings alive each day (price level in €; right axis), daily up to today.
+function renderIndexChart(el, trend) {
   if (!el) return;
   if (!trend || trend.length === 0) {
     el.innerHTML = '<div style="color:#94a3b8;font-size:.78rem;padding:1.4rem 0;text-align:center;">' +
@@ -292,16 +283,24 @@ function renderIndexChart(el, trend, big) {
     return;
   }
   const xs = trend.map(p => new Date(p.t + 'T00:00:00'));
-  const ys = trend.map(p => p.index * 100);
-  if (trend.length === 1) { xs.push(new Date()); ys.push(ys[0]); }
-  const up = ys[ys.length - 1] >= 100;
-  const color = up ? '#22c55e' : '#3b82f6';
+  const idx = trend.map(p => p.index * 100);
+  const med = trend.map(p => p.median);
+  if (trend.length === 1) { xs.push(new Date()); idx.push(idx[0]); med.push(med[0]); }
+  const color = idx[idx.length - 1] >= 100 ? '#22c55e' : '#3b82f6';
   Plotly.newPlot(el, [{
-    x: xs, y: ys, type: 'scatter', mode: 'lines',
+    x: xs, y: idx, type: 'scatter', mode: 'lines', name: 'Index',
     line: {color: color, width: 2, shape: 'hv'},
     hovertemplate: 'Index %{y:.1f}<br>%{x|%d.%m.%Y}<extra></extra>',
+  }, {
+    x: xs, y: med, type: 'scatter', mode: 'lines', name: 'Median', yaxis: 'y2',
+    connectgaps: true, line: {color: '#f59e0b', width: 1.5, shape: 'hv'},
+    hovertemplate: 'Median %{y:,.0f} €<br>%{x|%d.%m.%Y}<extra></extra>',
   }], Object.assign({}, CHART_LAYOUT, {
+    margin: {l: 48, r: 56, t: 6, b: 24},
+    showlegend: false,
     yaxis: {gridcolor: '#334155', ticksuffix: ' %', zeroline: false},
+    yaxis2: {overlaying: 'y', side: 'right', showgrid: false, tickformat: ',.0f',
+             ticksuffix: ' €', tickfont: {color: '#f59e0b'}, zeroline: false},
     shapes: [{type: 'line', xref: 'paper', x0: 0, x1: 1, y0: 100, y1: 100,
               line: {color: '#475569', width: 1, dash: 'dot'}}],
   }), CHART_CFG);
@@ -309,7 +308,6 @@ function renderIndexChart(el, trend, big) {
 function renderTrackerChart(t) {
   renderIndexChart(document.getElementById('tchart-' + t.id), t.trend);
 }
-renderIndexChart(document.getElementById('global-index'), GLOBAL_TREND);
 
 TRACKERS.forEach(renderTrackerChart);
 

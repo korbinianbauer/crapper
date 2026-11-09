@@ -193,7 +193,9 @@ def _price_index(items: list[dict], today: date | None = None) -> list[dict]:
     days, so new listings enter without causing a jump and vanished ones simply
     drop out (a listing counts until the day it was last seen). Prices are
     forward-filled between observations (history only stores changes).
-    Returns `[{'t': 'YYYY-MM-DD', 'index': float}]`, extended up to today."""
+    Returns `[{'t': 'YYYY-MM-DD', 'index': float, 'median': float|None}]`, extended
+    up to today; `median` is the median price of the listings alive that day
+    (price level, in contrast to the movement-only index)."""
     today = today or date.today()
     series = []                                    # (start, end, [(day, price)])
     for it in items:
@@ -224,12 +226,18 @@ def _price_index(items: list[dict], today: date | None = None) -> list[dict]:
     caches = [[0] for _ in series]
     prev: list[float | None] = [None] * len(series)
     level = 1.0
-    out = [{'t': first.isoformat(), 'index': level}]
+    def med(vals):
+        v = [x for x in vals if x is not None and x >= MIN_INDEX_PRICE]
+        return statistics.median(v) if v else None
+
+    out = []
     for k, day in enumerate(days):
         cur: list[float | None] = []
         for (start, end, pts), c in zip(series, caches):
             cur.append(price_on(pts, day, c) if start <= day <= end else None)
-        if k > 0:
+        if k == 0:
+            out.append({'t': day.isoformat(), 'index': level, 'median': med(cur)})
+        else:
             logs = []
             for a, b in zip(prev, cur):
                 if a is None or b is None or a < MIN_INDEX_PRICE or b < MIN_INDEX_PRICE:
@@ -238,7 +246,7 @@ def _price_index(items: list[dict], today: date | None = None) -> list[dict]:
                 logs.append(math.log(r))
             if logs:
                 level *= math.exp(sum(logs) / len(logs))
-            out.append({'t': day.isoformat(), 'index': level})
+            out.append({'t': day.isoformat(), 'index': level, 'median': med(cur)})
         prev = cur
     return out
 
@@ -327,8 +335,6 @@ def index():
         active_count=sum(1 for c in cards.values() if c['active']),
         gone_count=sum(1 for c in cards.values() if not c['active']),
         refreshing=list(_active_refreshes),
-        global_trend=_price_index(list(cards.values())),
-        global_median=_median_price(list(cards.values())),
     )
 
 
