@@ -163,21 +163,18 @@ def is_plausible(price, features, per) -> bool:
 
 
 def _load_artifact(blob: bytes) -> dict:
-    """joblib load; models trained via `python ml.py train` were pickled with their
-    classes under `__main__` — map those to this module."""
-    import pickle
+    """joblib load. Models trained via `python ml.py train` (before the CLI imported
+    this module) were pickled with `Encoder` under `__main__`; provide it while loading."""
     import joblib
-
-    class U(pickle.Unpickler):
-        def find_class(self, module, name):
-            if module == '__main__':
-                module = 'ml'
-            return super().find_class(module, name)
-
+    main = sys.modules['__main__']
+    added = not hasattr(main, 'Encoder')
+    if added:
+        main.Encoder = Encoder
     try:
         return joblib.load(io.BytesIO(blob))
-    except AttributeError:
-        return U(io.BytesIO(blob)).load()
+    finally:
+        if added:
+            del main.Encoder
 
 
 def predict(feature_set_name: str, listing_ids=None) -> int:
