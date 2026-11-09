@@ -162,6 +162,24 @@ def is_plausible(price, features, per) -> bool:
     return _sane({'price': price, 'features': features}, per)
 
 
+def _load_artifact(blob: bytes) -> dict:
+    """joblib load; models trained via `python ml.py train` were pickled with their
+    classes under `__main__` — map those to this module."""
+    import pickle
+    import joblib
+
+    class U(pickle.Unpickler):
+        def find_class(self, module, name):
+            if module == '__main__':
+                module = 'ml'
+            return super().find_class(module, name)
+
+    try:
+        return joblib.load(io.BytesIO(blob))
+    except AttributeError:
+        return U(io.BytesIO(blob)).load()
+
+
 def predict(feature_set_name: str, listing_ids=None) -> int:
     """Score listings with the stored model. Default: every listing that has features
     but no prediction yet. Explicit ids are re-scored (except training listings, whose
@@ -171,7 +189,7 @@ def predict(feature_set_name: str, listing_ids=None) -> int:
     model_row = db.get_latest_model(fs['id']) if fs else None
     if not model_row:
         raise SystemExit(f'no trained model for {feature_set_name!r} — run: python ml.py train')
-    art = joblib.load(io.BytesIO(model_row['artifact']))
+    art = _load_artifact(model_row['artifact'])
     with db.get_db() as conn:
         have = {r[0] for r in conn.execute(
             'SELECT listing_id FROM fair_prices WHERE model_id = ?', (model_row['id'],))}
@@ -201,11 +219,12 @@ def _importances(model, algo, X, y, names):
 
 
 if __name__ == '__main__':
+    import ml as _ml      # not __main__: classes in the pickled model must be importable as ml.*
     if len(sys.argv) == 3 and sys.argv[1] == 'train':
         db.init_db()
-        train(sys.argv[2])
+        _ml.train(sys.argv[2])
     elif len(sys.argv) == 3 and sys.argv[1] == 'predict':
         db.init_db()
-        print(predict(sys.argv[2]), 'predictions written')
+        print(_ml.predict(sys.argv[2]), 'predictions written')
     else:
         print(__doc__)
