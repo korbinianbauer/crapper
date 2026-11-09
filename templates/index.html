@@ -365,8 +365,12 @@ function ratingHtml(c) {
   const cls = d <= -10 ? 'cheap' : d >= 10 ? 'dear' : '';
   const txt = d <= -10 ? `${-d} % unter fair` : d >= 10 ? `${d} % über fair`
             : `fair (${d > 0 ? '+' : ''}${d} %)`;
-  const eff = c.eff_price ? ` title="Normierte Warmmiete ${c.eff_price.toLocaleString('de-DE')} € (inkl. Heizung, Strom, Internet, Wasser, Müll, Stellplatz)"` : '';
-  return `<div class="rating"${eff}><b class="${cls}">${txt}</b> · Fairer Preis ${fair}</div>`;
+  // rents are rated on the normalised Warmmiete (incl. Heizung, Strom, Internet, Wasser, Müll, Stellplatz) — show it
+  if (c.eff_price) {
+    const tip = 'Normierte Warmmiete inkl. Heizung, Strom, Internet, Wasser, Müllabfuhr und 1 PKW-Stellplatz (Details im Archiv)';
+    return `<div class="rating" title="${tip}"><b class="${cls}">${txt}</b> · normiert ${c.eff_price.toLocaleString('de-DE')} € vs. fair ${fair}</div>`;
+  }
+  return `<div class="rating"><b class="${cls}">${txt}</b> · Fairer Preis ${fair}</div>`;
 }
 
 function listingCardHtml(c) {
