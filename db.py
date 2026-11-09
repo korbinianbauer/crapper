@@ -192,7 +192,7 @@ def _add_columns_if_missing(conn, table: str, columns: dict[str, str]):
 def _init_default_settings(conn):
     defaults = {
         'poll_cron':    '0 4 * * *',   # daily at 04:00 server time
-        'search_pages': '5',           # max search result pages to walk per poll
+        'search_pages': '50',          # max search result pages to walk per poll
     }
     for key, val in defaults.items():
         conn.execute('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', (key, val))

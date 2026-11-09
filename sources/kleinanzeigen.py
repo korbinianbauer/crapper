@@ -354,6 +354,7 @@ class KleinanzeigenSource(Source):
     def fetch_search(self, url: str, max_pages: int = 5) -> list[ScrapedListing]:
         seen: dict[str, ScrapedListing] = {}
         total: int | None = None
+        stale = 0
         for page in range(1, max_pages + 1):
             try:
                 resp = self._get(self._page_url(url, page))
@@ -378,6 +379,12 @@ class KleinanzeigenSource(Source):
                 break
             if total is None and new == 0:
                 break          # unknown total → fall back to "no new ads" stop
+            # Past the last real page KA keeps serving the last page again; the
+            # reported total is inflated so it never triggers. Two consecutive
+            # pages without new ads (tolerating one transient duplicate) = end.
+            stale = stale + 1 if new == 0 else 0
+            if stale >= 2:
+                break
             if page < max_pages:
                 time.sleep(1.5)
         return list(seen.values())
