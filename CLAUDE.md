@@ -79,6 +79,15 @@ count, summary}` (or an error) — the frontend calls it live as the user pastes
    is active. Adding a tracker triggers an immediate background poll
    (`_refresh_async`).
 
+### Tracker detail view (`/tracker/<id>`)
+
+Rendered client-side from `CARDS`/`TRACKERS` (index payload). Each listing card shows its
+price and the ML rating (`fair_delta` = asking price vs. fair price in %, negative = cheaper;
+`None` when the price is implausible per `ml.is_plausible`; fair price from
+`db.get_fair_price_map()`). Sorting is URL-driven: `?sort=date|price|rating&dir=asc|desc`
+(defaults: date desc, price/rating asc; items without a value always last) and combines with
+`?gone=1`; all changes go through `setParams()`.
+
 ### Key files
 
 | File | Role |
@@ -127,14 +136,21 @@ count, summary}` (or an error) — the frontend calls it live as the user pastes
   the app** (`scripts/features/extract_wohnung_miete.py` → JSON → `scripts/import_features.py`).
   `python ml.py train <set>` picks the best of ridge/SVR/random forest/gradient boosting by
   repeated 5-fold CV on log(price), keeps only the newest model per set, and writes
-  `fair_prices`: training listings get their out-of-fold prediction (`oof=1`), others the full
-  model's. Listings with implausible prices (€/m² outside 4–40) are excluded from training.
+  `fair_prices`: training listings get their out-of-fold prediction, all others (excluded
+  or new) the stored model's — so every stored fair price is made without knowing that
+  listing's price (`oof` is always 1; kept for schema compatibility). Listings with implausible prices (€/m² outside 4–40) are excluded from training.
   Training is a **one-off**; new listings are scored with the stored model (`ml.predict`,
   no retraining) — `scripts/import_features.py` does that right after loading their features
   (or `python ml.py predict <set>` for any with features but no prediction). The archive view
-  (`/listing/<id>/archive`) shows fair vs. current price. Currently only set
-  `wohnung_miete_v1` (KA tracker 10, rental flats) exists; a listing gets a fair price once
-  its features have been extracted and imported.
+  (`/listing/<id>/archive`) shows fair vs. current price plus a collapsible table of all
+  evaluated features. Currently only set `wohnung_miete_v1` (KA tracker 10, rental flats)
+  exists; a listing gets a fair price once its features have been extracted and imported.
+  Models are pickled via joblib; `ml.py` is always run as an importable module
+  (`_ml.train`) and `_load_artifact` also loads older models pickled under `__main__`.
+  Workflow for new listings (run on the server, venv):
+  `python scripts/features/extract_wohnung_miete.py crapper.db 10 /tmp/f.json &&
+  python scripts/import_features.py /tmp/f.json` (extraction = review the regex output by hand
+  when text is unusual; the place→coordinates table in the extractor must be extended for new towns).
 - **`settings`** — `poll_cron` (default `0 4 * * *`), `search_pages`.
 
 `init_db()` drops & recreates the data tables if it detects a pre-multi-source
