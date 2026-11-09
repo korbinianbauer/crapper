@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from functools import wraps
 
 from bs4 import BeautifulSoup
@@ -171,6 +171,7 @@ def _refresh_async(tracker_id: int):
 
 # ── index ───────────────────────────────────────────────────────────────────────
 
+GONE_HIDE_DAYS = 7          # vanished listings are hidden by default after this long
 MIN_INDEX_PRICE = 5.0       # ignore placeholder prices (1 €, 0 €) in the index
 MAX_DAILY_MOVE = 2.0        # clamp a single listing's daily ratio to [1/2, 2]
 
@@ -253,15 +254,21 @@ def _price_index(items: list[dict], today: date | None = None,
     return out
 
 
-@app.route('/')
-def index():
+@app.route('/', defaults={'tracker_id': None})
+@app.route('/tracker/<int:tracker_id>')
+def index(tracker_id):
+    """Front page. `/tracker/<id>` is the same page with that tracker's detail
+    view open, so browser history and shareable URLs reflect where you are."""
     trackers = db.get_trackers()
+    if tracker_id is not None and not any(t['id'] == tracker_id for t in trackers):
+        abort(404)
     listings = db.get_all_listings()
     history = db.get_price_history_map()
     memberships = db.get_tracker_memberships()
 
     source_names = {s.name: s.display_name for s in sources.all_sources()}
 
+    gone_cutoff = (datetime.utcnow() - timedelta(days=GONE_HIDE_DAYS)).isoformat()
     cards: dict[int, dict] = {}
     for l in listings:
         hist = history.get(l['id'], [])
@@ -282,6 +289,8 @@ def index():
             'image_url': l['image_url'],
             'image_file': l['image_file'],
             'active': bool(l['active']),
+            # gone for more than a week → hidden in tracker views unless asked for
+            'stale_gone': not l['active'] and (l['last_seen'] or '') < gone_cutoff,
             'first_seen': l['first_seen'],
             'last_seen': l['last_seen'],
             'current_price': latest['price_text'] if latest else '—',
@@ -340,6 +349,7 @@ def index():
         active_count=sum(1 for c in cards.values() if c['active']),
         gone_count=sum(1 for c in cards.values() if not c['active']),
         refreshing=list(_active_refreshes),
+        open_tracker=tracker_id,
     )
 
 
@@ -498,12 +508,18 @@ def listing_version_html(listing_id, version):
                              'X-Content-Type-Options': 'nosniff'})
 
 
+def _safe_next() -> str | None:
+    """Same-site path from the form's `next` field (never an external URL)."""
+    n = request.form.get('next') or ''
+    return n if n.startswith('/') and not n.startswith('//') else None
+
+
 @app.route('/listing/<int:listing_id>/hide', methods=['POST'])
 @login_required
 @csrf_protect
 def hide_listing(listing_id):
     db.set_listing_hidden(listing_id, True)
-    return redirect(url_for('index'))
+    return redirect(_safe_next() or url_for('index'))
 
 
 @app.route('/listing/<int:listing_id>/unhide', methods=['POST'])
@@ -511,7 +527,7 @@ def hide_listing(listing_id):
 @csrf_protect
 def unhide_listing(listing_id):
     db.set_listing_hidden(listing_id, False)
-    return redirect(url_for('index'))
+    return redirect(_safe_next() or url_for('index'))
 
 
 # ── add / manage trackers ───────────────────────────────────────────────────────

@@ -187,6 +187,10 @@
 <div id="detail">
   <div class="back-bar">
     <button class="btn btn-outline" onclick="closeTracker()">← Zurück zur Übersicht</button>
+    <label id="gone-toggle" class="muted" style="display:none; font-size:.85rem; cursor:pointer; margin-left:.5rem;">
+      <input type="checkbox" id="gone-cb" onchange="toggleGone(this.checked)">
+      <span id="gone-label"></span>
+    </label>
     <h2 id="detail-title" style="margin:0; font-size:1.1rem;"></h2>
   </div>
   <div class="grid" id="detail-grid"></div>
@@ -221,6 +225,7 @@
 {% block scripts %}
 <script>
 const CARDS = {{ cards|tojson }};            // {listing_id: card}
+const OPEN_TRACKER = {{ open_tracker|tojson }};   // from the URL /tracker/<id>
 const TRACKERS = {{ tracker_cards|tojson }}; // overview cards
 const REFRESHING = {{ refreshing|tojson }};
 const CSRF = '{{ csrf_token() }}';
@@ -338,6 +343,7 @@ function listingCardHtml(c) {
   const hide = LOGGED_IN ? `
     <form method="post" action="/listing/${c.id}/hide" style="text-align:right;">
       <input type="hidden" name="_csrf" value="${CSRF}">
+      <input type="hidden" name="next" value="${esc(location.pathname + location.search)}">
       <button class="btn btn-outline btn-sm" type="submit"
               title="Auf der Startseite ausblenden (wird weiter getrackt)">🙈 Ausblenden</button>
     </form>` : '';
@@ -364,25 +370,97 @@ const detail   = document.getElementById('detail');
 const detailGrid = document.getElementById('detail-grid');
 const detailTitle = document.getElementById('detail-title');
 
-function openTracker(id) {
+const BASE_TITLE = document.title;
+
+// Charts of the detail view are rendered lazily, when their card nears the viewport
+// (a tracker can have thousands of listings).
+let chartObserver = null;
+function observeCharts(cards) {
+  if (chartObserver) chartObserver.disconnect();
+  const byId = new Map(cards.map(c => [String(c.id), c]));
+  chartObserver = new IntersectionObserver(entries => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      chartObserver.unobserve(e.target);
+      const c = byId.get(e.target.dataset.id);
+      if (c) renderListingChart(c);
+    }
+  }, {rootMargin: '600px 0px'});
+  detailGrid.querySelectorAll('.listing').forEach(el => chartObserver.observe(el));
+}
+
+// Vanished listings are hidden once gone for over a week; ?gone=1 shows them all.
+let currentTrackerId = null;
+function showGoneFromUrl() { return new URLSearchParams(location.search).get('gone') === '1'; }
+
+function showTracker(id) {
   const t = TRACKERS.find(x => x.id === id);
-  if (!t) return;
-  const cards = t.listing_ids.map(i => CARDS[i]).filter(Boolean);
+  if (!t) return false;
+  currentTrackerId = id;
+  const all = t.listing_ids.map(i => CARDS[i]).filter(Boolean);
+  const stale = all.filter(c => c.stale_gone).length;
+  const showGone = showGoneFromUrl();
+  const cards = showGone ? all : all.filter(c => !c.stale_gone);
   detailTitle.textContent = t.label + ' — ' + cards.length + ' Anzeigen';
+  const tog = document.getElementById('gone-toggle');
+  tog.style.display = stale ? '' : 'none';
+  document.getElementById('gone-cb').checked = showGone;
+  document.getElementById('gone-label').textContent =
+    stale + ' seit über einer Woche verschwundene Anzeigen ' + (showGone ? 'angezeigt' : 'ausgeblendet');
   detailGrid.innerHTML = cards.length
     ? cards.map(listingCardHtml).join('')
     : '<div class="card muted" style="padding:2rem;text-align:center;">Noch keine Anzeigen.</div>';
   overview.style.display = 'none';
   detail.style.display = 'block';
-  cards.forEach(renderListingChart);
+  observeCharts(cards);
+  document.title = t.label + ' · ' + BASE_TITLE;
+  return true;
+}
+
+function toggleGone(on) {
+  history.replaceState(history.state, '', location.pathname + (on ? '?gone=1' : ''));
+  showTracker(currentTrackerId);
+}
+
+function showOverview() {
+  detail.style.display = 'none';
+  overview.style.display = '';
+  detailGrid.innerHTML = '';
+  document.title = BASE_TITLE;
+  // charts rendered while hidden need a resize to fill their card
+  TRACKERS.forEach(t => { const el = document.getElementById('tchart-' + t.id);
+                          if (el && el.data) Plotly.Plots.resize(el); });
+}
+
+// The URL is the source of truth: /tracker/<id> = detail view, / = overview.
+function trackerIdFromLocation() {
+  const m = location.pathname.match(/^\/tracker\/(\d+)\/?$/);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+function openTracker(id) {
+  history.replaceState({scroll: window.scrollY}, '');   // remember overview scroll
+  if (!showTracker(id)) return;
+  history.pushState({fromOverview: true}, '', '/tracker/' + id);
   window.scrollTo(0, 0);
 }
 
 function closeTracker() {
-  detail.style.display = 'none';
-  overview.style.display = '';
-  detailGrid.innerHTML = '';
+  // Behave like "Back" when we came from the overview, so history stays tidy.
+  if (history.state && history.state.fromOverview) { history.back(); return; }
+  history.pushState({}, '', '/');
+  showOverview();
+  window.scrollTo(0, 0);
 }
+
+window.addEventListener('popstate', e => {
+  const id = trackerIdFromLocation();
+  if (id !== null && showTracker(id)) { window.scrollTo(0, 0); return; }
+  showOverview();
+  window.scrollTo(0, (e.state && e.state.scroll) || 0);
+});
+
+if (OPEN_TRACKER !== null) showTracker(OPEN_TRACKER);
 
 // ── modals ────────────────────────────────────────────────────────────────
 function closeModals() {

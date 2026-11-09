@@ -74,6 +74,104 @@ def _parse_price(text: str | None) -> tuple[float | None, str | None]:
         return None, clean
 
 
+# ── tracker titles from search parameters ─────────────────────────────────────
+_CATEGORY_NAMES = {
+    'immobilien': 'Immobilien', 'grundstuecke-garten': 'Grundstücke & Gärten',
+    'auto-rad-boot': 'Auto, Rad & Boot', 'elektronik': 'Elektronik',
+    'haus-garten': 'Haus & Garten', 'mode-beauty': 'Mode & Beauty',
+    'familie-kind-baby': 'Familie, Kind & Baby', 'freizeit-hobby-nachbarschaft':
+    'Freizeit, Hobby & Nachbarschaft', 'musik-film-buecher': 'Musik, Filme & Bücher',
+    'haustiere': 'Haustiere', 'jobs': 'Jobs', 'dienstleistungen': 'Dienstleistungen',
+    'eintrittskarten-tickets': 'Eintrittskarten & Tickets',
+    'unentgeltlich-zu-verschenken': 'Zu verschenken', 'verschenken-tauschen':
+    'Verschenken & Tauschen', 'fahrzeuge': 'Fahrzeuge',
+}
+_CODE_RE = re.compile(r'^k0(?:c(\d+))?(?:l(\d+))?(?:r(\d+))?(?P<attrs>\+.*)?$')
+_H1_COUNT_RE = re.compile(r'^\d[\d.]*\s*-\s*\d[\d.]*\s+von\s+[\d.]+\s+')
+
+
+def _pretty(slug: str) -> str:
+    return slug.replace('_', ' ').replace('-', ' ').strip().capitalize()
+
+
+def _price_filter(v: str) -> str:
+    lo, _, hi = v.partition(':')
+    if lo and hi:
+        return f'{lo}–{hi} €'
+    return f'ab {lo} €' if lo else (f'bis {hi} €' if hi else '')
+
+
+def _h1_parts(h1: str) -> tuple[str | None, str | None]:
+    """(keyword, place) from a result heading like
+    '1 - 25 von 47 Immobilien für „wald“ in Schliersee - Bayern und Umgebung'.
+    The count is dropped on purpose (KA's count is inflated and unstable)."""
+    text = ' '.join((h1 or '').split())
+    text = re.sub(r'\d[\d.]*\s*-\s*\d[\d.]*\s+von\s+[\d.]+', ' ', text)
+    kw = re.search(r'„(.+?)“', text)
+    m = (re.search(r'„.+?“\s+in\s+(.+?)(?:\s+-\s+.*)?$', text)
+         or re.search(r'.*\bin\s+(.+?)(?:\s+-\s+.*)?$', text))
+    place = ' '.join(m.group(1).split()) if m else None
+    return (kw.group(1) if kw else None), place
+
+
+def search_label(url: str, h1: str | None = None) -> str:
+    """Describe what a Kleinanzeigen search tracks, e.g.
+    '„wald“ · Grundstücke & Gärten · Miesbach +30 km · kaufen'.
+    Everything comes from the URL (category, radius, filters); keyword and place
+    names additionally from the page heading when available."""
+    path, parts, flt = urlparse(url).path, [], []
+    segs = [x for x in path.split('/') if x]
+    if not segs or not segs[0].startswith('s-'):
+        return 'Kleinanzeigen-Suche'
+    segs[0] = segs[0][2:]
+    code = _CODE_RE.match(segs[-1]) if segs else None
+    names = []
+    for seg in segs[:-1] if code else segs:
+        if seg.startswith('seite:') or not seg:
+            continue
+        if ':' in seg:
+            k, _, v = seg.partition(':')
+            if k == 'preis':
+                if f := _price_filter(v):
+                    flt.append(f)
+            elif k == 'versand':
+                flt.append('mit Versand' if v == 'ja' else 'ohne Versand')
+            else:
+                flt.append(f'{_pretty(k)}: {_pretty(v)}')
+        else:
+            names.append(seg)
+    cat_id = code.group(1) if code else None
+    radius = code.group(3) if code else None
+    has_loc = bool(code and code.group(2))
+    attrs = code.group('attrs') if code else None
+    for a in (attrs or '').split('+'):
+        if ':' in a:
+            flt.append(a.split(':', 1)[1].replace('_', ' '))
+
+    kw, place = _h1_parts(h1) if h1 else (None, None)
+    category = _CATEGORY_NAMES.get(names[0], _pretty(names[0])) if cat_id and names else None
+    if kw is None and not h1:
+        # offline: the keyword slug is the last name segment (after category [/ place])
+        extra = names[(1 if cat_id else 0) + (1 if has_loc else 0):]
+        if extra:
+            kw = extra[-1].replace('-', ' ')
+
+    out = []
+    if kw:
+        out.append(f'„{kw}“')
+    if category:
+        out.append(category)
+    if has_loc:
+        where = place or 'Umkreis'
+        out.append(f'{where} +{radius} km' if radius else where)
+    elif place:
+        out.append(place)
+    else:
+        out.append('Deutschland')
+    out += flt
+    return ' · '.join(out)
+
+
 class KleinanzeigenSource(Source):
     name = 'kleinanzeigen'
     display_name = 'Kleinanzeigen'
@@ -103,7 +201,7 @@ class KleinanzeigenSource(Source):
         if '/s-anzeige/' in url or ad_id:
             return UrlInfo('listing', label=ad_id or 'Anzeige', ad_id=ad_id)
         if path.startswith('/s-'):       # all KA search paths start with /s-
-            return UrlInfo('search', label='Kleinanzeigen-Suche')
+            return UrlInfo('search', label=search_label(url))
         return None
 
     # ── single listing ───────────────────────────────────────────────────────
@@ -189,7 +287,9 @@ class KleinanzeigenSource(Source):
         except Exception as e:
             logger.error('KA describe_search failed: %s', e)
             return None, ''
-        return self._parse_total(resp.text), self._label_from_html(resp.text)
+        h1 = BeautifulSoup(resp.text, _PARSER).select_one('h1')
+        label = search_label(url, h1.get_text(' ', strip=True) if h1 else None)
+        return self._parse_total(resp.text), label
 
     def _parse_page(self, html: str) -> list[ScrapedListing]:
         # Match by data-adid (not a CSS class) so this survives KA's old
