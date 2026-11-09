@@ -32,6 +32,11 @@
   .d-note { font-size:.78rem; color:var(--muted); margin:.15rem 0 .5rem; }
   .wb-imgs .new { outline:3px solid var(--primary); }
   .wb-imgs .gone { outline:3px solid var(--danger); opacity:.55; }
+  .fair { margin-top:1.25rem; padding:.9rem 1.25rem; display:flex; flex-wrap:wrap; gap:.4rem 2rem; align-items:center; }
+  .fair .big { font-size:1.5rem; font-weight:700; }
+  .fair .lbl { font-size:.72rem; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  .fair .cheap { color:var(--primary); } .fair .dear { color:var(--danger); }
+  .fair details { flex-basis:100%; font-size:.8rem; color:var(--muted); }
   .wb-banner { font-size:.8rem; color:var(--muted); }
 </style>
 {% endblock %}
@@ -68,6 +73,28 @@
     {%- if op == 'eq' -%}{{ t }}{%- else -%}<span class="d-{{ op }}">{{ t }}</span>{%- endif -%}
   {%- endfor -%}{%- else -%}{{ plain }}{%- endif -%}
 {%- endmacro %}
+
+{% if fair %}
+<div class="card fair">
+  <div><div class="lbl">Fairer Preis (ML)</div><div class="big">{{ '{:,.0f}'.format(fair.fair_price).replace(',', '.') }} €</div></div>
+  {% if fair.current %}
+  <div><div class="lbl">Aktueller Preis</div><div class="big">{{ '{:,.0f}'.format(fair.current).replace(',', '.') }} €</div></div>
+  <div><div class="lbl">Einordnung</div>
+    {% set d = fair.delta_pct %}
+    {% if not fair.oof %}<div class="muted" style="font-size:.85rem;">Preis unplausibel (z. B. Tausch/Platzhalter) – Einordnung nicht sinnvoll</div>
+    {% else %}<div class="big {{ 'cheap' if d <= -10 else ('dear' if d >= 10 else '') }}">
+      {% if d <= -10 %}{{ -d }} % unter fair{% elif d >= 10 %}{{ d }} % über fair{% else %}fair ({{ '%+d'|format(d) }} %){% endif %}</div>{% endif %}</div>
+  {% endif %}
+  <div class="muted" style="font-size:.78rem; max-width:34rem;">
+    Modell: {{ fair.algo|replace('_', ' ') }}, trainiert am {{ fair.trained_at[:10] }} auf {{ fair.n_train }} Anzeigen.
+    Typische Abweichung ±{{ fair.median_ape }} % (mittlerer Fehler {{ fair.mae|round|int }} €).
+    {% if not fair.oof %}Diese Anzeige hatte keinen verwertbaren Preis im Training.{% else %}Schätzung ohne Kenntnis des eigenen Preises (Cross-Validation).{% endif %}
+    Preise ≙ Angebotspreis, keine Garantie.</div>
+  {% if fair.facts %}<details><summary>Verwendete Eigenschaften ({{ fair.facts|length }})</summary>
+    {% for label, v in fair.facts %}{{ label }}{% if v is not sameas true %}: <b>{{ v }}</b>{% endif %}{% if not loop.last %} · {% endif %}{% endfor %}
+  </details>{% endif %}
+</div>
+{% endif %}
 
 <div class="wb-tabs">
   {% if has_page %}<a class="{{ 'on' if view == 'page' }}" href="?v={{ cur.version }}&view=page">Originalansicht</a>{% endif %}

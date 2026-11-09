@@ -137,6 +137,44 @@ def init_db():
             );
             CREATE INDEX IF NOT EXISTS idx_stats_tracker ON poll_stats(tracker_id, polled_at);
 
+            -- ML "fair price": a feature set defines up to 30 named features (JSON list of
+            -- {key,label,type}) for the listings of one tracker; values are extracted
+            -- manually (scripts/features/) and stored per listing; models are trained from them.
+            CREATE TABLE IF NOT EXISTS feature_sets (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT NOT NULL UNIQUE,
+                tracker_id  INTEGER REFERENCES trackers(id) ON DELETE SET NULL,
+                definition  TEXT NOT NULL,        -- JSON: {"features": [...], "target": "price"}
+                created_at  TEXT DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS listing_features (
+                listing_id     INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+                feature_set_id INTEGER NOT NULL REFERENCES feature_sets(id) ON DELETE CASCADE,
+                data           TEXT NOT NULL,     -- JSON {feature_key: value|null}
+                source_version INTEGER,           -- listing_versions.version it was read from
+                extracted_at   TEXT NOT NULL,
+                PRIMARY KEY (listing_id, feature_set_id)
+            );
+            CREATE TABLE IF NOT EXISTS ml_models (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                feature_set_id INTEGER NOT NULL REFERENCES feature_sets(id) ON DELETE CASCADE,
+                algo           TEXT NOT NULL,
+                trained_at     TEXT NOT NULL,
+                n_train        INTEGER NOT NULL,
+                metrics        TEXT NOT NULL,     -- JSON: CV scores of all candidates + chosen one
+                artifact       BLOB NOT NULL      -- joblib (encoder + fitted estimator)
+            );
+            -- Latest prediction per listing and model. oof=1: made by a model that did not
+            -- see this listing's price (cross-validation), i.e. an honest estimate.
+            CREATE TABLE IF NOT EXISTS fair_prices (
+                listing_id   INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+                model_id     INTEGER NOT NULL REFERENCES ml_models(id) ON DELETE CASCADE,
+                fair_price   REAL NOT NULL,
+                oof          INTEGER NOT NULL DEFAULT 0,
+                predicted_at TEXT NOT NULL,
+                PRIMARY KEY (listing_id, model_id)
+            );
+
             CREATE TABLE IF NOT EXISTS settings (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL DEFAULT ''
@@ -437,6 +475,107 @@ def get_listing(listing_id: int) -> dict | None:
     with get_db() as conn:
         r = conn.execute('SELECT * FROM listings WHERE id = ?', (listing_id,)).fetchone()
     return dict(r) if r else None
+
+
+# ── ML fair price ─────────────────────────────────────────────────────────────
+
+def _now() -> str:
+    return datetime.utcnow().isoformat(timespec='seconds')
+
+
+def upsert_feature_set(name: str, tracker_id: int | None, definition: dict) -> int:
+    import json
+    with get_db() as conn:
+        conn.execute('''INSERT INTO feature_sets (name, tracker_id, definition) VALUES (?, ?, ?)
+                        ON CONFLICT(name) DO UPDATE SET tracker_id = excluded.tracker_id,
+                                                        definition = excluded.definition''',
+                     (name, tracker_id, json.dumps(definition, ensure_ascii=False)))
+        return conn.execute('SELECT id FROM feature_sets WHERE name = ?', (name,)).fetchone()[0]
+
+
+def get_feature_set(name: str) -> dict | None:
+    import json
+    with get_db() as conn:
+        r = conn.execute('SELECT * FROM feature_sets WHERE name = ?', (name,)).fetchone()
+    if not r:
+        return None
+    d = dict(r)
+    d['definition'] = json.loads(d['definition'])
+    return d
+
+
+def save_listing_features(feature_set_id: int, rows: dict[int, dict]) -> int:
+    """rows: {listing_id: {feature_key: value}}. Replaces existing values. Returns #stored."""
+    import json
+    now = _now()
+    n = 0
+    with get_db() as conn:
+        for lid, vals in rows.items():
+            if not conn.execute('SELECT 1 FROM listings WHERE id = ?', (lid,)).fetchone():
+                continue
+            ver = conn.execute('SELECT MAX(version) FROM listing_versions WHERE listing_id = ?',
+                               (lid,)).fetchone()[0]
+            conn.execute('''INSERT OR REPLACE INTO listing_features
+                            (listing_id, feature_set_id, data, source_version, extracted_at)
+                            VALUES (?, ?, ?, ?, ?)''',
+                         (lid, feature_set_id, json.dumps(vals, ensure_ascii=False), ver, now))
+            n += 1
+    return n
+
+
+def get_training_rows(feature_set_id: int) -> list[dict]:
+    """[{listing_id, features: {...}, price}] — price = latest numeric observation or None."""
+    import json
+    with get_db() as conn:
+        rows = conn.execute('''
+            SELECT lf.listing_id, lf.data,
+                   (SELECT price FROM price_history WHERE listing_id = lf.listing_id
+                      AND price IS NOT NULL ORDER BY observed_at DESC, id DESC LIMIT 1) AS price
+            FROM listing_features lf WHERE lf.feature_set_id = ?''', (feature_set_id,)).fetchall()
+    return [{'listing_id': r['listing_id'], 'features': json.loads(r['data']), 'price': r['price']}
+            for r in rows]
+
+
+def save_model(feature_set_id: int, algo: str, n_train: int, metrics: dict, artifact: bytes,
+               predictions: dict[int, tuple[float, bool]]) -> int:
+    """Store a trained model and (replacing older models' rows) its predictions
+    {listing_id: (fair_price, out_of_fold)}."""
+    import json
+    now = _now()
+    with get_db() as conn:
+        cur = conn.execute('''INSERT INTO ml_models (feature_set_id, algo, trained_at, n_train,
+                                                     metrics, artifact) VALUES (?, ?, ?, ?, ?, ?)''',
+                           (feature_set_id, algo, now, n_train, json.dumps(metrics), artifact))
+        mid = cur.lastrowid
+        conn.executemany('''INSERT INTO fair_prices (listing_id, model_id, fair_price, oof, predicted_at)
+                            VALUES (?, ?, ?, ?, ?)''',
+                         [(lid, mid, p, int(o), now) for lid, (p, o) in predictions.items()])
+        # keep only the newest model per feature set (predictions cascade)
+        conn.execute('DELETE FROM ml_models WHERE feature_set_id = ? AND id != ?',
+                     (feature_set_id, mid))
+    return mid
+
+
+def get_fair_price(listing_id: int) -> dict | None:
+    import json
+    with get_db() as conn:
+        r = conn.execute('''
+            SELECT fp.fair_price, fp.oof, fp.predicted_at, m.algo, m.trained_at, m.n_train, m.metrics,
+                   fs.name AS feature_set, lf.data AS features, fs.definition
+            FROM fair_prices fp
+            JOIN ml_models m ON m.id = fp.model_id
+            JOIN feature_sets fs ON fs.id = m.feature_set_id
+            LEFT JOIN listing_features lf ON lf.listing_id = fp.listing_id
+                                         AND lf.feature_set_id = fs.id
+            WHERE fp.listing_id = ? ORDER BY m.trained_at DESC, m.id DESC LIMIT 1''',
+                         (listing_id,)).fetchone()
+    if not r:
+        return None
+    d = dict(r)
+    d['metrics'] = json.loads(d['metrics'])
+    d['features'] = json.loads(d['features']) if d['features'] else {}
+    d['definition'] = json.loads(d['definition'])
+    return d
 
 
 def get_version_images(listing_id: int, version: int) -> list[str]:

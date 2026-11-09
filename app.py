@@ -431,6 +431,18 @@ def listing_archive(listing_id):
             ('price', price_at(idx - 1), price))}
         diff = {k: {'segs': v, 'changed': any(op != 'eq' for op, _ in v)} for k, v in diff.items()}
         diff['images'] = {'changed': bool(removed_images or any(i['new'] for i in images))}
+    fair = db.get_fair_price(listing_id)
+    if fair:
+        cur_price = next((p['price'] for p in reversed(prices) if p['price'] is not None), None)
+        fair['current'] = cur_price
+        fair['delta_pct'] = round((cur_price / fair['fair_price'] - 1) * 100) if cur_price else None
+        m = fair['metrics']
+        fair['mae'] = m['candidates'][m['chosen']]['mae']
+        fair['median_ape'] = round(m['candidates'][m['chosen']]['median_ape'] * 100)
+        feats = {f['key']: f for f in fair['definition']['features']}
+        fair['facts'] = [(feats[k]['label'], int(v) if isinstance(v, float) and v.is_integer() else v)
+                         for k, v in fair['features'].items()
+                         if k in feats and v not in (None, False)]
     source_names = {s.name: s.display_name for s in sources.all_sources()}
     raw = db.get_version_html(listing_id, cur['version']) if cur['has_html'] else None
     has_page = bool(raw) and not raw.lstrip().startswith('{')   # ImmoScout archives JSON, not a page
@@ -439,7 +451,7 @@ def listing_archive(listing_id):
         view = 'page' if has_page else 'data'
     return render_template('archive.html', listing=listing, versions=versions, cur=cur, prev=prev,
                            idx=idx, images=images, removed_images=removed_images, diff=diff,
-                           price=price, has_page=has_page, view=view,
+                           price=price, has_page=has_page, view=view, fair=fair,
                            source_name=source_names.get(listing['source'], listing['source']))
 
 

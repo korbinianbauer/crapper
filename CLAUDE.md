@@ -89,6 +89,8 @@ count, summary}` (or an error) — the frontend calls it live as the user pastes
 | `sources/__init__.py` | `REGISTRY`, `get`, `all_sources`, `source_for_url` |
 | `sources/kleinanzeigen.py`, `sources/immoscout.py` | the two sources |
 | `pagearchive.py` | archives a stored page's CSS/fonts/images (Wayback-style) + helpers to rewrite them |
+| `ml.py` | fair-price model: `Encoder`, CV model selection, `train(feature_set)`; CLI `python ml.py train <set>` |
+| `scripts/features/`, `scripts/import_features.py` | **manual** feature extraction (JSON) + loader into the DB |
 | `poller.py` | `poll_tracker()` / `poll_all_due()` — orchestrates source → DB |
 | `poll.py` | APScheduler cron loop (separate process) |
 | `templates/index.html` | Listing grid + Plotly charts + single add-by-URL modal with live `/inspect` preview |
@@ -119,6 +121,17 @@ count, summary}` (or an error) — the frontend calls it live as the user pastes
   hashes, so old versions keep the look they had. `/listing/<id>/version/<v>/page`
   serves the page (scripts stripped, sandboxed) with URLs rewritten to
   `/archive/asset/<hash>`. Only css/image/font types are stored; fetches are SSRF-guarded.
+- **`feature_sets`** / **`listing_features`** / **`ml_models`** / **`fair_prices`** — the ML
+  "fair price" (`ml.py`). A feature set (≤30 features, JSON definition: key/label/type
+  num|bool|cat) belongs to one tracker; values per listing are extracted **manually, not by
+  the app** (`scripts/features/extract_wohnung_miete.py` → JSON → `scripts/import_features.py`).
+  `python ml.py train <set>` picks the best of ridge/SVR/random forest/gradient boosting by
+  repeated 5-fold CV on log(price), keeps only the newest model per set, and writes
+  `fair_prices`: training listings get their out-of-fold prediction (`oof=1`), others the full
+  model's. Listings with implausible prices (€/m² outside 4–40) are excluded from training.
+  The archive view (`/listing/<id>/archive`) shows fair vs. current price. Currently only
+  set `wohnung_miete_v1` (KA tracker 10, rental flats) exists; new listings get no fair price
+  until their features are extracted and the model re-trained.
 - **`settings`** — `poll_cron` (default `0 4 * * *`), `search_pages`.
 
 `init_db()` drops & recreates the data tables if it detects a pre-multi-source
