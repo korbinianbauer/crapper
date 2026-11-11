@@ -57,9 +57,9 @@
   .rb-flag.end span { left:auto; right:0; border-radius:5px 0 5px 5px; }
   .rb-legend { display:flex; flex-wrap:wrap; gap:.3rem 1.1rem; font-size:.78rem; color:var(--muted); }
   .rb-legend i { display:inline-block; width:.8rem; height:.8rem; border-radius:3px; margin-right:.35rem; vertical-align:-1px; }
-  .rb-kalt { background:#22c55e; } .rb-fair { background:#2dd4bf; } .rb-nk { background:#60a5fa; }
-  .rb-heizung { background:#fb923c; } .rb-strom { background:#facc15; } .rb-internet { background:#c084fc; }
-  .rb-stellplatz { background:#94a3b8; } .rb-wasser { background:#38bdf8; } .rb-muell { background:#a3a380; }
+  .rb-kalt, .rb-fair { background:#7dd3fc; } .rb-nk { background:#a78bfa; } .rb-heizung { background:#fb923c; }
+  .rb-wasser { background:#1d4ed8; color:#fff; } .rb-muell { background:#92400e; color:#fff; } .rb-strom { background:#facc15; }
+  .rb-internet { background:#f8fafc; } .rb-stellplatz { background:#94a3b8; }
   .wb-banner { font-size:.8rem; color:var(--muted); }
 </style>
 {% endblock %}
@@ -122,7 +122,7 @@
     {% endfor %}
     {% if B.fair_missing %}<div class="muted" style="font-size:.8rem;">Angemessene Warmmiete {{ eur(fair.fair_price_disp) }} € liegt unter den Nebenkosten – keine angemessene Kaltmiete ableitbar.</div>{% endif %}
     <div class="rb-legend">
-      <span><i class="rb-kalt"></i>Kaltmiete</span>{% if B.rows|length > 1 %}<span><i class="rb-fair"></i>Angemessene Kaltmiete</span>{% endif %}
+      <span><i class="rb-kalt"></i>Kaltmiete</span>
       {% for p in B.parts %}<span><i class="rb-{{ p.key }}"></i>{{ p.label }}{{ '*' if p.assumed }} {{ eur(p.eur) }} €</span>{% endfor %}
     </div>
     <div class="muted" style="font-size:.72rem;">Normiert = Warmmiete inkl. Heizung, Strom, Internet, Wasser, Müll, 1 PKW-Stellplatz.
