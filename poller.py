@@ -47,12 +47,12 @@ def archive_full_images(source, urls):
 DETAIL_INTERVAL = timedelta(hours=20)    # "at least daily" with slack for poll jitter
 
 # Ad-page fetches of a source are paced by one persistent interval: the time between
-# two requests. It doubles after every 403/429 and shrinks by 10 % after every
+# two requests. It doubles after every 403/429 and halves after every
 # successful fetch, always staying within BACKOFF_MIN … BACKOFF_MAX.
 BACKOFF_MIN = timedelta(seconds=1)       # also the start value
 BACKOFF_MAX = timedelta(hours=4)
 BACKOFF_GROWTH = 2.0
-BACKOFF_DECAY = 0.9
+BACKOFF_DECAY = 0.5
 LIMITED_TO_BACK = 3                      # an ad blocked this often in one poll is retried last
 MAX_POLL_WAIT = timedelta(hours=4)       # a poll gives up on items not due within this of its start
 IN_FLIGHT = timedelta(minutes=2)         # slot reserved for a running request (crash safety)
@@ -122,7 +122,7 @@ def _register_block(source):
 
 
 def _note_success(source):
-    """An ad-page request that was not rate-limited: interval −10 %."""
+    """An ad-page request that was not rate-limited: halve the interval."""
     _pace(source, BACKOFF_DECAY)
 
 
