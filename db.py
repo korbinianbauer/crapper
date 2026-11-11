@@ -198,6 +198,7 @@ def init_db():
         _add_columns_if_missing(conn, 'listings', {
             'hidden': 'INTEGER NOT NULL DEFAULT 0',   # hidden from the frontpage by the user
             'detail_at': 'TEXT',                      # last full-page archive (ISO UTC)
+            'detail_tried_at': 'TEXT',                # last full-page fetch attempt, ok or not
             'image_file': 'TEXT',                     # locally archived copy of image_url
         })
         _add_columns_if_missing(conn, 'listing_versions', {
@@ -1090,13 +1091,45 @@ def get_price_history_map() -> dict[int, list[dict]]:
     return out
 
 
-def needs_detail(listing_id: int, older_than: str) -> bool:
-    """True if the full ad page was never archived or not since *older_than*."""
+def detail_queue(listing_ids, older_than: str) -> list[int]:
+    """Those of *listing_ids* whose full ad page is due (never archived or not since
+    *older_than*), least recently *attempted* first (never attempted before all).
+    Sorting by attempt, not success, gives a round-robin: an ad whose page keeps
+    failing moves to the back instead of eating the request budget every run."""
+    ids = list(dict.fromkeys(listing_ids))
+    due = []
     with get_db() as conn:
-        r = conn.execute('SELECT detail_at FROM listings WHERE id = ?', (listing_id,)).fetchone()
-    return bool(r) and (not r[0] or r[0] < older_than)
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            due += conn.execute(
+                f'''SELECT id, detail_tried_at FROM listings
+                     WHERE id IN ({",".join("?" * len(chunk))})
+                       AND (detail_at IS NULL OR detail_at < ?)''',
+                (*chunk, older_than)).fetchall()
+    due.sort(key=lambda r: (r[1] is not None, r[1] or ''))
+    return [r[0] for r in due]
+
+
+def listing_tracker_ads(tracker_ids) -> dict[int, tuple[int, str | None]]:
+    """tracker_id → (listing_id, detail_tried_at) for single-listing trackers that
+    have already found their ad (trackers without a listing yet are absent)."""
+    ids = list(tracker_ids)
+    if not ids:
+        return {}
+    with get_db() as conn:
+        rows = conn.execute(
+            f'''SELECT tl.tracker_id, l.id, l.detail_tried_at
+                  FROM tracker_listings tl JOIN listings l ON l.id = tl.listing_id
+                 WHERE tl.tracker_id IN ({",".join("?" * len(ids))})''', ids).fetchall()
+    return {r[0]: (r[1], r[2]) for r in rows}
+
+
+def mark_detail_tried(listing_id: int, at: str):
+    with get_db() as conn:
+        conn.execute('UPDATE listings SET detail_tried_at = ? WHERE id = ?', (at, listing_id))
 
 
 def mark_detail(listing_id: int, at: str):
     with get_db() as conn:
-        conn.execute('UPDATE listings SET detail_at = ? WHERE id = ?', (at, listing_id))
+        conn.execute('UPDATE listings SET detail_at = ?, detail_tried_at = ? WHERE id = ?',
+                     (at, at, listing_id))

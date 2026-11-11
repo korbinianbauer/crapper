@@ -15,7 +15,7 @@ from urllib.parse import urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 
-from .base import ScrapedListing, Source, UrlInfo
+from .base import RateLimited, ScrapedListing, Source, UrlInfo
 
 logger = logging.getLogger(__name__)
 
@@ -220,6 +220,9 @@ class KleinanzeigenSource(Source):
             return None
         if resp.status_code == 404:
             return None
+        if resp.status_code in (403, 429):
+            logger.warning('KA listing %s HTTP %s (rate-limited/blocked)', ad_id, resp.status_code)
+            raise RateLimited(f'KA HTTP {resp.status_code}')
         if resp.status_code != 200:
             logger.warning('KA listing %s HTTP %s', ad_id, resp.status_code)
             return None

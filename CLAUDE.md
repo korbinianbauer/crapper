@@ -70,7 +70,8 @@ count, summary}` (or an error) — the frontend calls it live as the user pastes
    - **listing** → `source.fetch_listing(url)`; if gone,
      `db.mark_tracker_listings_inactive()` flags this tracker's membership.
    - **search** → `source.fetch_search(url)`; each ad is upserted; memberships
-     not seen this run are flagged via `db.deactivate_missing()`.
+     not seen this run are flagged via `db.deactivate_missing()`. Ad pages of the
+     hits are fetched afterwards in a shared, prioritised queue (see Kleinanzeigen notes).
 3. `db.upsert_listing(source, ad_id, …)` refreshes/creates the listing (unique by
    `(source, ad_id)`); `db.link_listing()` records the tracker→listing
    membership; `db.add_price()` appends a `price_history` row (skipping
@@ -200,8 +201,18 @@ schema (no `trackers.source` column). No backward compatibility is maintained.
 - Search cards (newer layout): the `<a>` only wraps the image (text = photo count);
   title + image URL come from the embedded `ld+json` ImageObject.
 - Search hits get their full ad page fetched + archived at most every 20 h
-  (`Source.archive_details`, `poller._archive_full`): all images, description,
+  (`Source.archive_details`, `poller._fetch_detail`): all images, description,
   details, original HTML → `listing_versions` + `archive/images/`.
+  A poll runs in **two phases** (`poller._poll`): first all trackers' searches
+  (prices, memberships, deactivation), then one shared queue of the due ad pages
+  (`db.detail_queue`), ordered by `listings.detail_tried_at` ascending (never tried
+  first) — a round-robin, so ads left over by a 403 block come first next run and
+  permanently failing pages move to the back. A 403/429 does not count as an
+  attempt, unless the same ad also hit the previous block. Price rescue for search
+  cards without a price (`poll_stats.rescued`) happens in phase 2. Single-listing
+  trackers run after the searches, also least recently attempted first, and share
+  the backoff: skipped while blocked, a 403/429 never marks the ad inactive.
+  Both sources raise `RateLimited` on HTTP 403/429 from ad pages.
 
 ### ImmoScout24
 - Locations: `GET https://www.immobilienscout24.de/geoautocomplete/v3/locations.json?i=…`
