@@ -176,8 +176,9 @@ price and the ML rating (`fair_delta` = asking price vs. fair price in %, negati
   price is 10 % below the ML prediction, to bridge asking prices vs. real deals). The offset is applied
   at read time (`db.get_fair_price_map` / `get_fair_price`); `fair_prices` always stores the raw prediction.
 - **`settings`** — `poll_cron` (default `0 4 * * *`), `search_pages`, `detail_block_<source>` (JSON
-  `{level, until}`: persistent backoff for ad-page fetches after HTTP 403/429 — `RateLimited` from the source;
-  suspension 30 s · 2^(level-1), max 24 h, the poll waits it out (see Kleinanzeigen notes); reset by the next successful fetch).
+  `{delay, next}`: persistent pacing of ad-page fetches — `delay` = seconds between two requests of the source
+  (starts at 1 s, always within 1 s … 4 h), ×2 after every HTTP 403/429 (`RateLimited` from the source), ×0.9 after
+  every successful fetch; `next` = earliest time of the next request (see Kleinanzeigen notes)).
 
 `init_db()` drops & recreates the data tables if it detects a pre-multi-source
 schema (no `trackers.source` column). No backward compatibility is maintained.
@@ -207,13 +208,14 @@ schema (no `trackers.source` column). No backward compatibility is maintained.
   (prices, memberships, deactivation), then one queue (`poller._drain`) of the
   single-listing trackers followed by the due ad pages (`db.detail_queue`), each
   ordered by `listings.detail_tried_at` ascending (never tried first) — a
-  round-robin, so permanently failing pages move to the back. A 403/429 does not
-  count as an attempt, unless the same ad also hit the previous block, and never
-  marks an ad inactive. While a source is blocked its items are held back and the
-  other sources continue; when only held items are left the poll **waits for the
-  block to end and resumes** (blocked ad first), unless the block ends more than
-  `MAX_POLL_WAIT` (4 h) after the poll started — then the rest is left for the next
-  poll, where it comes first. Price rescue for search cards without a price
+  round-robin, so permanently failing pages move to the back. Each source is paced
+  by its own interval (`detail_block_<source>`, see settings): the queue takes the
+  first item whose source may send again, otherwise sleeps until one may — so
+  sources interleave and a rate-limited source just slows down. A 403/429 never
+  counts as an attempt or marks an ad inactive; the ad is retried first (after 3
+  blocks in one poll: last). Items whose source is not ready within
+  `MAX_POLL_WAIT` (4 h) of the poll's start are left for the next
+  poll, where they come first. Price rescue for search cards without a price
   (`poll_stats.rescued`) happens in phase 2. Both sources raise `RateLimited` on
   HTTP 403/429 from ad pages.
 

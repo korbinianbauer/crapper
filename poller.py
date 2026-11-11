@@ -2,7 +2,6 @@
 disappeared listings."""
 import json
 import logging
-import random
 import time
 from datetime import datetime, timedelta
 
@@ -46,51 +45,65 @@ def archive_full_images(source, urls):
 
 
 DETAIL_INTERVAL = timedelta(hours=20)    # "at least daily" with slack for poll jitter
-DETAIL_DELAY = (1.0, 3.0)                # random pause range (s) between ad-page requests
 
-BACKOFF_START = timedelta(seconds=30)    # block after the first 403/429 …
-BACKOFF_MAX = timedelta(hours=24)        # … doubling with every further one, up to this cap
-MAX_POLL_WAIT = timedelta(hours=4)       # a poll waits out blocks ending within this of its start
+# Ad-page fetches of a source are paced by one persistent interval: the time between
+# two requests. It doubles after every 403/429 and shrinks by 10 % after every
+# successful fetch, always staying within BACKOFF_MIN … BACKOFF_MAX.
+BACKOFF_MIN = timedelta(seconds=1)       # also the start value
+BACKOFF_MAX = timedelta(hours=4)
+BACKOFF_GROWTH = 2.0
+BACKOFF_DECAY = 0.9
+LIMITED_TO_BACK = 3                      # an ad blocked this often in one poll is retried last
+MAX_POLL_WAIT = timedelta(hours=4)       # a poll gives up on items not due within this of its start
 
 
 def _block_key(source) -> str:
     return f'detail_block_{source.name}'
 
 
-def _detail_blocked_until(source) -> datetime | None:
-    """Persistent circuit breaker: until when ad-page fetches of this source are
-    suspended after a 403/429 (None = not suspended)."""
-    try:
-        st = json.loads(db.get_setting(_block_key(source), '') or 'null')
-        until = datetime.fromisoformat(st['until']) if st else None
-    except (ValueError, KeyError, TypeError):
-        return None
-    return until if until and until > datetime.utcnow() else None
-
-
-def _register_block(source, lid: int | None = None) -> bool:
-    """Rate-limited: double the suspension (30 s, 1 min, 2 min, … max 24 h). The level
-    survives restarts and only resets after a successful fetch. Returns True if the
-    same listing *lid* also hit the previous block (→ maybe the ad itself, not us)."""
+def _pace_state(source) -> dict:
+    """{'delay': interval in s, 'next': ISO time the next request may go out (or None)}.
+    Defaults for a source with no history."""
     try:
         st = json.loads(db.get_setting(_block_key(source), '') or 'null') or {}
-        level = int(st['level'])
-    except (ValueError, KeyError, TypeError, AttributeError):
-        st, level = {}, 0
-    repeat = lid is not None and st.get('lid') == lid
-    level += 1
-    delay = min(BACKOFF_START * 2 ** (level - 1), BACKOFF_MAX)
-    until = datetime.utcnow() + delay
-    db.set_setting(_block_key(source), json.dumps(
-        {'level': level, 'until': until.isoformat(), 'lid': lid}))
-    logger.warning('%s ad pages rate-limited (#%d) — detail fetches suspended for %s (until %s UTC)',
-                   source.name, level, delay, until.isoformat(timespec='seconds'))
-    return repeat
+        delay = float(st['delay']) if 'delay' in st else BACKOFF_MIN.total_seconds()
+        nxt = st.get('next') or st.get('until')          # 'until': pre-interval format
+        datetime.fromisoformat(nxt) if nxt else None
+        return {'delay': delay, 'next': nxt}
+    except (ValueError, TypeError, AttributeError):
+        return {'delay': BACKOFF_MIN.total_seconds(), 'next': None}
 
 
-def _clear_block(source):
-    if db.get_setting(_block_key(source), ''):
-        db.set_setting(_block_key(source), '')
+def _ready_at(source) -> datetime:
+    """When this source's next ad-page request may go out (≤ now: right away)."""
+    nxt = _pace_state(source)['next']
+    return datetime.fromisoformat(nxt) if nxt else datetime.min
+
+
+def _pace(source, st: dict, factor: float):
+    """Scale the interval by *factor* (clamped) and schedule the next request."""
+    st['delay'] = min(max(st['delay'] * factor, BACKOFF_MIN.total_seconds()),
+                      BACKOFF_MAX.total_seconds())
+    st['next'] = (datetime.utcnow() + timedelta(seconds=st['delay'])).isoformat()
+    db.set_setting(_block_key(source), json.dumps(st))
+
+
+def _register_block(source):
+    """Rate-limited (403/429): double the interval; the next request waits for it."""
+    st = _pace_state(source)
+    _pace(source, st, BACKOFF_GROWTH)
+    logger.warning('%s ad pages rate-limited — interval now %s (next request %s UTC)',
+                   source.name, timedelta(seconds=round(st['delay'])), st['next'][11:19])
+
+
+def _note_success(source):
+    """An ad-page request that was not rate-limited: interval −10 %."""
+    _pace(source, _pace_state(source), BACKOFF_DECAY)
+
+
+def _note_attempt(source):
+    """A request that failed otherwise (network error …): keep the interval."""
+    _pace(source, _pace_state(source), 1.0)
 
 
 class _DetailJob:
@@ -103,32 +116,26 @@ class _DetailJob:
 
 
 class _Limited(Exception):
-    """A fetch hit HTTP 403/429: the item stays queued (retried after the block).
-    *back* = the same ad also hit the previous block → retry it last."""
-    def __init__(self, back: bool):
-        self.back = back
+    """A fetch hit HTTP 403/429: the item stays queued and is retried."""
 
 
 def _fetch_detail(job: _DetailJob):
     """Fetch the whole ad page and archive it (all images, description, details,
     original HTML). A failed/removed fetch changes nothing — activity is decided by
     the search, not by this. Every attempt is recorded (`detail_tried_at`) so the
-    queue rotates. A 403/429 is not the ad's fault and is not recorded — unless the
-    same ad also hit the previous block, then it goes to the back of the queue."""
+    queue rotates; a 403/429 is not the ad's fault and is not recorded."""
     source, now = job.source, _now()
-    time.sleep(random.uniform(*DETAIL_DELAY))
     try:
         full = job.source.fetch_listing(job.url)
     except RateLimited:
-        repeat = _register_block(source, job.lid)
-        if repeat:
-            db.mark_detail_tried(job.lid, now)
-        raise _Limited(repeat)
+        _register_block(source)
+        raise _Limited()
     except Exception as e:
         logger.warning('Detail fetch failed %s: %s', job.url, e)
+        _note_attempt(source)
         db.mark_detail_tried(job.lid, now)
         return None
-    _clear_block(source)
+    _note_success(source)
     if full is None:
         db.mark_detail_tried(job.lid, now)
         return None
@@ -148,40 +155,39 @@ def _detail_item(job: _DetailJob, stats: dict):
 
 
 def _drain(queue: list, started: datetime):
-    """Work through *queue* (list of (source, label, fn)). Items of a source that is
-    rate-limited are held back while the others continue; once only held-back items
-    are left, wait for the block to end and resume — unless the block would end later
-    than MAX_POLL_WAIT after the poll started, then they are left for the next poll
-    (where they come first, as least recently attempted)."""
+    """Work through *queue* (list of (source, label, fn)) in order, each source at its
+    own pace (`_ready_at`): the next item is the first one whose source may send
+    again; if none may, sleep until the earliest does. A rate-limited item stays in
+    place (retried first); after LIMITED_TO_BACK blocks in this poll it moves to the
+    end, in case the ad itself, not our pace, triggers them. Items whose source is not ready within MAX_POLL_WAIT of the poll's start
+    are left for the next poll (where they come first, as least recently attempted)."""
+    queue = list(queue)
+    limited: dict[int, int] = {}
     while queue:
-        held, last = [], []
-        for item in queue:
-            source, label, fn = item
-            if _detail_blocked_until(source):
-                held.append(item)
-                continue
-            try:
-                fn()
-            except _Limited as e:
-                (last if e.back else held).append(item)   # retried first, or last if repeat
-            except Exception as e:
-                logger.error('%s failed: %s', label, e)
-        queue = held + last
-        if not queue:
-            break
-        until = min(filter(None, (_detail_blocked_until(src) for src in {i[0] for i in queue})),
-                    default=None)
-        if until is None:
-            continue                      # block already over: go on right away
-        if until > started + MAX_POLL_WAIT:
-            logger.warning('%d ad pages left for the next poll — rate-limit block runs until '
-                           '%s UTC, beyond this poll\'s wait limit', len(queue),
-                           until.isoformat(timespec='seconds'))
-            break
-        wait = (until - datetime.utcnow()).total_seconds() + 5
-        logger.info('Waiting %.0f min for the rate-limit block to end (%d ad pages left)',
-                    wait / 60, len(queue))
-        time.sleep(max(wait, 0))
+        ready = {src: _ready_at(src) for src in {i[0] for i in queue}}
+        now = datetime.utcnow()
+        idx = next((k for k, item in enumerate(queue) if ready[item[0]] <= now), None)
+        if idx is None:
+            soonest = min(ready.values())
+            if soonest > started + MAX_POLL_WAIT:
+                logger.warning('%d ad pages left for the next poll — next request allowed at '
+                               '%s UTC, beyond this poll\'s wait limit', len(queue),
+                               soonest.isoformat(timespec='seconds'))
+                return
+            wait = (soonest - now).total_seconds()
+            if wait >= 60:
+                logger.info('Waiting %s for the rate-limit interval (%d ad pages left)',
+                            timedelta(seconds=round(wait)), len(queue))
+            time.sleep(wait)
+            continue
+        item = queue.pop(idx)
+        try:
+            item[2]()
+        except _Limited:
+            limited[id(item)] = n = limited.get(id(item), 0) + 1
+            queue.insert(len(queue) if n % LIMITED_TO_BACK == 0 else idx, item)
+        except Exception as e:
+            logger.error('%s failed: %s', item[1], e)
 
 
 def poll_tracker(tracker: dict):
@@ -253,11 +259,9 @@ def _poll_listing_tracker(tracker: dict, source, lid: int | None):
     try:
         scraped = source.fetch_listing(tracker['url'])
     except RateLimited:
-        repeat = _register_block(source, lid) and lid is not None
-        if repeat:
-            db.mark_detail_tried(lid, seen_at)
-        raise _Limited(repeat)
-    _clear_block(source)
+        _register_block(source)
+        raise _Limited()
+    _note_success(source)
 
     if scraped is None:
         # Ad removed / unavailable — flag this tracker's membership inactive (the
