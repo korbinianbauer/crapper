@@ -150,8 +150,18 @@ price and the ML rating (`fair_delta` = asking price vs. fair price in %, negati
   no retraining) — run `ml.predict(<set>, ids)` right after saving their features
   (or `python ml.py predict <set>` for any with features but no prediction). The archive view
   (`/listing/<id>/archive`) shows fair vs. current price plus a collapsible table of all
-  evaluated features. Currently only set `wohnung_miete_v1` (KA tracker 10, rental flats)
-  exists; a listing gets a fair price once its features have been extracted and imported.
+  evaluated features. A listing gets a fair price once its features have been extracted and imported.
+  Rental flats use ONE joint model: the feature set `wohnung_miete_gesamt_v1` (no tracker, identical
+  30 features: incl. `nutzflaeche`, `ausstattung` 0–3, `zustand` 0–4) covers KA tracker 10 and ImmoScout
+  tracker 14. The per-tracker sets `wohnung_miete_v1` (10) / `wohnung_miete_is_v1` (14) still exist as the
+  place where the agent first extracts, but **have no models** — keep it that way (delete any model trained
+  on them: `db.get_fair_price_map` iterates sets alphabetically and the later set silently overrides the
+  earlier one, so a model in a per-tracker set would beat the joint one). New listings of tracker 10/14:
+  save the features in the tracker's set **and** copy the same dict into `wohnung_miete_gesamt_v1`
+  (`db.save_listing_features(<gesamt id>, {...})`), then `ml.predict("wohnung_miete_gesamt_v1", ids)`.
+  Changing the feature definition requires adding it to all three sets and retraining
+  (`python ml.py train wohnung_miete_gesamt_v1`). `Nutzfläche` is stored as the ad states it (often
+  just a cellar/side area for small values); `_cost.add` is null when the ad names no Nebenkosten.
   Models are pickled via joblib; `ml.py` is always run as an importable module
   (`_ml.train`) and `_load_artifact` also loads older models pickled under `__main__`.
   Workflow for new listings (run on the server, venv):
