@@ -1,6 +1,7 @@
 """Poll logic: refresh every tracker via its source, archive prices, flag
 disappeared listings."""
 import json
+from collections import Counter
 import logging
 import time
 from datetime import datetime, timedelta
@@ -133,11 +134,12 @@ def _note_attempt(source):
 
 class _DetailJob:
     """A search hit whose full ad page should be archived (phase 2 of a poll)."""
-    __slots__ = ('source', 'lid', 'url', 'seen_at', 'priceless')
+    __slots__ = ('source', 'lid', 'url', 'seen_at', 'priceless', 'trackers')
 
     def __init__(self, source, lid, url, seen_at):
         self.source, self.lid, self.url, self.seen_at = source, lid, url, seen_at
         self.priceless: set[int] = set()   # trackers whose search card had no price
+        self.trackers: set[int] = set()    # search trackers that found this ad
 
 
 class _Limited(Exception):
@@ -276,9 +278,14 @@ def _poll(trackers: list[dict]):
              for t, src in singles]
     try:
         cutoff = (datetime.utcnow() - DETAIL_INTERVAL).isoformat()
+        due = db.detail_queue(jobs, cutoff)
+        per_tracker = Counter(t for lid in due for t in jobs[lid].trackers)
+        for tid, st in stats.items():
+            logger.info('Search tracker %d: %d of %d ad pages due for fetching',
+                        tid, per_tracker[tid], st['found'])
         queue += [(jobs[lid].source, f'Detail fetch of listing {lid}',
                    lambda job=jobs[lid]: _detail_item(job, stats))
-                  for lid in db.detail_queue(jobs, cutoff)]
+                  for lid in due]
         _drain(queue, started)
     except Exception as e:
         logger.error('Detail archiving failed: %s', e)
@@ -329,7 +336,7 @@ def _poll_search_tracker(tracker: dict, source, jobs: dict) -> dict:
         max_pages = 5
 
     results = source.fetch_search(tracker['url'], max_pages=max_pages)
-    priced = queued = 0
+    priced = 0
     for r in results:
         lid = _upsert(source, r, seen_at)
         db.link_listing(tracker['id'], lid, seen_at)
@@ -338,13 +345,13 @@ def _poll_search_tracker(tracker: dict, source, jobs: dict) -> dict:
             priced += 1
             db.add_price(lid, seen_at, r.price, r.price_text)
         if source.archive_details:
-            queued += 1
             job = jobs.setdefault(lid, _DetailJob(source, lid, r.url, seen_at))
+            job.trackers.add(tracker['id'])
             if not has_price:
                 job.priceless.add(tracker['id'])
 
     # Anything not refreshed this run has dropped out of the search → inactive.
     db.deactivate_missing(tracker['id'], seen_at)
-    logger.info('Search tracker %d (%s): %d listings found, %d queued for ad-page check',
-                tracker['id'], source.name, len(results), queued)
+    logger.info('Search tracker %d (%s): %d listings found', tracker['id'], source.name,
+                len(results))
     return {'seen_at': seen_at, 'found': len(results), 'priced': priced, 'rescued': 0}
