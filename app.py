@@ -523,6 +523,12 @@ def _fair_info(listing_id, prices):
     fair['fair_offer'] = _fair_offer(fair['fair_price_disp'], fair['eff'], cur_price) if fair['eff'] else None
     ref = fair['fair_offer'] or fair['fair_price_disp']
     fair['delta_pct'] = round((cur_price / ref - 1) * 100) if cur_price and ref else None
+    # Kaltmiete (as stated, or estimated for warm-basis ads) and the fair Kaltmiete: the fair
+    # normalised Warmmiete minus everything added on top of the Kaltmiete to normalise it
+    fair['kalt'], fair['kalt_est'] = ml.kalt_rent(cur_price, fair.get('cost'), fair['features'],
+                                                  fair['metrics'].get('cost_assumptions'),
+                                                  ml.cost_models_for(fair['model_id'])) if fair['eff'] else (None, False)
+    fair['fair_kalt'] = _fair_offer(fair['fair_price_disp'], fair['eff'], fair['kalt']) if fair['kalt'] else None
     m = fair['metrics']
     fair['mae'] = m['candidates'][m['chosen']]['mae']
     fair['median_ape'] = round(m['candidates'][m['chosen']]['median_ape'] * 100)

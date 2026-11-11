@@ -175,6 +175,36 @@ def effective_breakdown(price, cost, features, assume, cmodels=None):
     return sum(v for _, v in parts), parts
 
 
+def kalt_rent(price, cost, features, assume, cmodels=None):
+    """(Kaltmiete, estimated) for a rent listing. Basis kalt: the asking price as stated in the ad.
+    Basis warm: asking price minus the Nebenkosten/Heizung (ML estimate) and Strom/Internet it contains.
+    (None, False) without cost data."""
+    if not cost or price is None or not assume:
+        return None, False
+    if cost.get('basis') == 'kalt':
+        return price, False
+    a = {**DEFAULT_COSTS, **assume}
+    legacy = 'strom' in assume and 'strom_kwh' not in assume
+    wf = (features or {}).get('wohnflaeche') or 0
+    incl, extra = set(cost.get('incl') or []), set(cost.get('extra') or [])
+    if legacy:
+        sub = a['nk_m2'] * wf
+    else:
+        nk = _predict_small((cmodels or {}).get('nk'), _cost_row(features, cost))
+        sub = (nk if nk else 2.0 * wf)
+        if 'heizung' not in extra:
+            sub += heating_eur(cost, features, a, cmodels)
+    for k in ('wasser', 'muell'):          # part of the Betriebskosten estimate, but not in this price
+        if k in extra:
+            sub -= a[k]
+    if 'strom' in incl:
+        sub += a['strom'] if legacy else a['strom_verbrauch'] * a['strom_kwh'] / 12
+    if 'internet' in incl:
+        sub += a['internet']
+    kalt = price - sub
+    return (round(kalt), True) if kalt > 0 else (None, True)
+
+
 def effective_price(price, cost, features, assume, cmodels=None):
     return effective_breakdown(price, cost, features, assume, cmodels)[0]
 

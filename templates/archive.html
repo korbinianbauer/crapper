@@ -85,9 +85,15 @@
   <div id="price-chart" style="width:100%; height:170px;"></div>
 </div>
 {% if fair %}
+{% set wf = fair.features.get('wohnflaeche') %}
+{% macro per_m2(v) %}{% if wf and v %}<div class="muted" style="font-size:.8rem;">{{ '{:.2f}'.format(v / wf).replace('.', ',') }} €/m²</div>{% endif %}{% endmacro %}
 <div class="card fair">
   {% if fair.current %}
-  <div><div class="lbl">Angebotspreis</div><div class="big">{{ '{:,.0f}'.format(fair.current).replace(',', '.') }} €</div></div>
+  <div><div class="lbl">{{ 'Angebotspreis (Kaltmiete lt. Anzeige)' if fair.kalt and not fair.kalt_est else 'Angebotspreis' }}</div><div class="big">{{ '{:,.0f}'.format(fair.current).replace(',', '.') }} €</div>{% if fair.kalt and not fair.kalt_est %}{{ per_m2(fair.current) }}{% endif %}</div>
+  {% if fair.kalt and fair.kalt_est %}
+  <div><div class="lbl">Kaltmiete (geschätzt)</div><div class="big">{{ '{:,.0f}'.format(fair.kalt).replace(',', '.') }} €</div>{{ per_m2(fair.kalt) }}
+    <div class="muted" style="font-size:.72rem; max-width:22rem;">Anzeige nennt Warmmiete – abzüglich geschätzter Neben-/Heizkosten</div></div>
+  {% endif %}
   {% if fair.eff %}
   <div><div class="lbl">Normierte Warmmiete</div><div class="big">{{ '{:,.0f}'.format(fair.eff).replace(',', '.') }} €</div>
     <div class="muted" style="font-size:.72rem; max-width:22rem;" title="Warmmiete inkl. Heizung, Strom, Internet, Wasser, Müll, 1 PKW-Stellplatz">
@@ -97,7 +103,10 @@
   <div><div class="lbl">{{ 'Angemessene Warmmiete' if fair.eff else 'Angemessener Preis (ML)' }}</div><div class="big">{{ '{:,.0f}'.format(fair.fair_price_disp).replace(',', '.') }} €</div></div>
   {% if fair.current %}
   {% if fair.fair_offer %}
-  <div><div class="lbl">Angemessener Angebotspreis</div><div class="big">{{ '{:,.0f}'.format(fair.fair_offer).replace(',', '.') }} €</div></div>
+  <div><div class="lbl">{{ 'Angemessene Kaltmiete' if fair.kalt and not fair.kalt_est else 'Angemessener Angebotspreis' }}</div><div class="big">{{ '{:,.0f}'.format(fair.fair_offer).replace(',', '.') }} €</div>{% if fair.kalt and not fair.kalt_est %}{{ per_m2(fair.fair_offer) }}{% endif %}</div>
+  {% endif %}
+  {% if fair.fair_kalt and fair.kalt_est %}
+  <div><div class="lbl">Angemessene Kaltmiete</div><div class="big">{{ '{:,.0f}'.format(fair.fair_kalt).replace(',', '.') }} €</div>{{ per_m2(fair.fair_kalt) }}</div>
   {% endif %}
   <div><div class="lbl">Einordnung</div>
     {% set d = fair.delta_pct %}
