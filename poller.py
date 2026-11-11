@@ -48,7 +48,7 @@ def archive_full_images(source, urls):
 DETAIL_INTERVAL = timedelta(hours=20)    # "at least daily" with slack for poll jitter
 DETAIL_DELAY = (1.0, 3.0)                # random pause range (s) between ad-page requests
 
-BACKOFF_START = timedelta(minutes=10)    # block after the first 403/429 …
+BACKOFF_START = timedelta(seconds=30)    # block after the first 403/429 …
 BACKOFF_MAX = timedelta(hours=24)        # … doubling with every further one, up to this cap
 MAX_POLL_WAIT = timedelta(hours=4)       # a poll waits out blocks ending within this of its start
 
@@ -69,7 +69,7 @@ def _detail_blocked_until(source) -> datetime | None:
 
 
 def _register_block(source, lid: int | None = None) -> bool:
-    """Rate-limited: double the suspension (10 min, 20 min, … max 24 h). The level
+    """Rate-limited: double the suspension (30 s, 1 min, 2 min, … max 24 h). The level
     survives restarts and only resets after a successful fetch. Returns True if the
     same listing *lid* also hit the previous block (→ maybe the ad itself, not us)."""
     try:
