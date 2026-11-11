@@ -90,6 +90,9 @@
             {% endfor %}
           </table>
           <button class="btn btn-outline btn-sm" type="submit" style="margin-top:.75rem;">Ausgewähltes Modell verwenden</button>
+          <button class="btn btn-outline btn-sm" type="submit" style="margin-top:.75rem;"
+                  formaction="{{ url_for('settings_delete_model', fs_id=fs.id) }}"
+                  onclick="return confirm('Ausgewähltes Modell endgültig löschen?')">Ausgewähltes Modell löschen</button>
         </form>
         <div class="hint">Fehler = Kreuzvalidierung auf den Trainingsanzeigen. Das aktive Modell bestimmt den
           angemessenen Preis überall (Tracker-Ansicht, Archiv, neue Anzeigen).</div>

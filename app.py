@@ -856,6 +856,20 @@ def settings_select_model(fs_id):
     return redirect(url_for('settings_fair_pricing'))
 
 
+@app.route('/settings/fair-pricing/<int:fs_id>/model/delete', methods=['POST'])
+@login_required
+@csrf_protect
+def settings_delete_model(fs_id):
+    try:
+        model_id = int(request.form.get('model_id', ''))
+    except ValueError:
+        abort(400)
+    if not db.get_feature_set_by_id(fs_id) or not db.delete_model(fs_id, model_id):
+        abort(404)
+    flash(f'Modell {model_id} gelöscht.', 'ok')
+    return redirect(url_for('settings_fair_pricing'))
+
+
 COST_FIELDS = [('strom_kwh', 'Strom (€/kWh)'), ('strom_verbrauch', 'Stromverbrauch (kWh/Jahr)'),
                ('gas_kwh', 'Erdgas (€/kWh)'), ('oel_l', 'Heizöl (€/Liter)'), ('fernwaerme_kwh', 'Fernwärme (€/kWh)'),
                ('pellets_kg', 'Holzpellets (€/kg)'), ('holz_rm', 'Scheitholz (€/Raummeter)'),

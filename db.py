@@ -651,6 +651,19 @@ def set_fair_offset(feature_set_id: int, pct: float):
     set_setting(f'fair_offset_{feature_set_id}', repr(float(pct)))
 
 
+def delete_model(feature_set_id: int, model_id: int) -> bool:
+    """Delete a model and its predictions; if it was the chosen one the newest remaining takes over."""
+    with get_db() as conn:
+        if not conn.execute('SELECT 1 FROM ml_models WHERE id = ? AND feature_set_id = ?',
+                            (model_id, feature_set_id)).fetchone():
+            return False
+        conn.execute('DELETE FROM fair_prices WHERE model_id = ?', (model_id,))
+        conn.execute('DELETE FROM ml_models WHERE id = ?', (model_id,))
+        conn.execute('DELETE FROM settings WHERE key = ? AND value = ?',
+                     (f'fair_model_{feature_set_id}', str(model_id)))
+    return True
+
+
 def set_active_model(feature_set_id: int, model_id: int) -> bool:
     with get_db() as conn:
         if not conn.execute('SELECT 1 FROM ml_models WHERE id = ? AND feature_set_id = ?',
