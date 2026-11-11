@@ -8,6 +8,11 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 
+class RateLimited(Exception):
+    """The site refused a request because we are being throttled/blocked (HTTP 403/429).
+    Distinct from "ad removed" (None) so callers can back off instead of giving up."""
+
+
 @dataclass
 class ScrapedListing:
     """Normalised listing returned by every source."""

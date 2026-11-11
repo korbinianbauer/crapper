@@ -168,7 +168,9 @@ price and the ML rating (`fair_delta` = asking price vs. fair price in %, negati
   active model (default: newest), `fair_offset_<feature_set_id>` = manual offset in % (-10 → shown fair
   price is 10 % below the ML prediction, to bridge asking prices vs. real deals). The offset is applied
   at read time (`db.get_fair_price_map` / `get_fair_price`); `fair_prices` always stores the raw prediction.
-- **`settings`** — `poll_cron` (default `0 4 * * *`), `search_pages`.
+- **`settings`** — `poll_cron` (default `0 4 * * *`), `search_pages`, `detail_block_<source>` (JSON
+  `{level, until}`: persistent backoff for ad-page fetches after HTTP 403/429 — `RateLimited` from the source;
+  suspension 10 min · 2^(level-1), max 24 h, rest of the poll continues; reset by the next successful fetch).
 
 `init_db()` drops & recreates the data tables if it detects a pre-multi-source
 schema (no `trackers.source` column). No backward compatibility is maintained.

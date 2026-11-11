@@ -24,6 +24,7 @@ import db
 import ml
 import sources
 from poller import poll_tracker
+from sources.base import RateLimited
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
@@ -647,7 +648,10 @@ def _inspect_url(url: str) -> dict:
     base = {'ok': True, 'source': source.name, 'source_name': source.display_name,
             'type': info.type, 'label': info.label}
     if info.type == 'listing':
-        scraped = source.fetch_listing(url)
+        try:
+            scraped = source.fetch_listing(url)
+        except RateLimited:
+            scraped = None
         if scraped is None:
             return {'ok': False, 'error': 'Anzeige nicht abrufbar (entfernt oder gesperrt).'}
         base['label'] = scraped.title or info.label

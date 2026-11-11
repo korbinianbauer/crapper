@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
-from .base import ScrapedListing, Source, UrlInfo
+from .base import RateLimited, ScrapedListing, Source, UrlInfo
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +148,9 @@ class ImmoScoutSource(Source):
             return None
         if resp.status_code == 404:
             return None
+        if resp.status_code in (403, 429):
+            logger.warning('IS24 expose %s HTTP %s (rate-limited/blocked)', ad_id, resp.status_code)
+            raise RateLimited(f'IS24 HTTP {resp.status_code}')
         if resp.status_code != 200:
             logger.warning('IS24 expose %s HTTP %s', ad_id, resp.status_code)
             return None

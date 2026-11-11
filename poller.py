@@ -1,6 +1,8 @@
 """Poll logic: refresh every tracker via its source, archive prices, flag
 disappeared listings."""
+import json
 import logging
+import random
 import time
 from datetime import datetime, timedelta
 
@@ -8,6 +10,7 @@ import archive
 import db
 import pagearchive
 import sources
+from sources.base import RateLimited
 
 logger = logging.getLogger(__name__)
 
@@ -43,22 +46,64 @@ def archive_full_images(source, urls):
 
 
 DETAIL_INTERVAL = timedelta(hours=20)    # "at least daily" with slack for poll jitter
-DETAIL_DELAY = 1.0                       # seconds between ad-page requests
+DETAIL_DELAY = (1.0, 3.0)                # random pause range (s) between ad-page requests
+
+BACKOFF_START = timedelta(minutes=10)    # block after the first 403/429 …
+BACKOFF_MAX = timedelta(hours=24)        # … doubling with every further one, up to this cap
+
+
+def _block_key(source) -> str:
+    return f'detail_block_{source.name}'
+
+
+def _detail_blocked_until(source) -> datetime | None:
+    """Persistent circuit breaker: until when ad-page fetches of this source are
+    suspended after a 403/429 (None = not suspended)."""
+    try:
+        st = json.loads(db.get_setting(_block_key(source), '') or 'null')
+        until = datetime.fromisoformat(st['until']) if st else None
+    except (ValueError, KeyError, TypeError):
+        return None
+    return until if until and until > datetime.utcnow() else None
+
+
+def _register_block(source):
+    """Rate-limited: double the suspension (10 min, 20 min, … max 24 h). The level
+    survives restarts and only resets after a successful fetch."""
+    try:
+        level = int(json.loads(db.get_setting(_block_key(source), '') or 'null')['level'])
+    except (ValueError, KeyError, TypeError):
+        level = 0
+    level += 1
+    delay = min(BACKOFF_START * 2 ** (level - 1), BACKOFF_MAX)
+    until = datetime.utcnow() + delay
+    db.set_setting(_block_key(source), json.dumps({'level': level, 'until': until.isoformat()}))
+    logger.warning('%s ad pages rate-limited (#%d) — detail fetches suspended for %s (until %s UTC)',
+                   source.name, level, delay, until.isoformat(timespec='seconds'))
+
+
+def _clear_block(source):
+    if db.get_setting(_block_key(source), ''):
+        db.set_setting(_block_key(source), '')
 
 
 def _archive_full(source, lid: int, url: str, seen_at: str):
     """Fetch the whole ad page and archive it (all images, description, details,
     original HTML). A failed/removed fetch changes nothing — activity is decided
-    by the search, not by this."""
+    by the search, not by this. Suspended while the source's backoff is running."""
     cutoff = (datetime.utcnow() - DETAIL_INTERVAL).isoformat()
-    if not db.needs_detail(lid, cutoff):
+    if not db.needs_detail(lid, cutoff) or _detail_blocked_until(source):
         return None
-    time.sleep(DETAIL_DELAY)
+    time.sleep(random.uniform(*DETAIL_DELAY))
     try:
         full = source.fetch_listing(url)
+    except RateLimited:
+        _register_block(source)          # also ends detail fetching for the rest of the run
+        return None
     except Exception as e:
         logger.warning('Detail fetch failed %s: %s', url, e)
         return None
+    _clear_block(source)
     if full is None:
         return None
     lid = _upsert(source, full, seen_at)
