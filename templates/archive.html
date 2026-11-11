@@ -86,7 +86,6 @@
 </div>
 {% if fair %}
 <div class="card fair">
-  <div><div class="lbl">Angemessener Preis (ML)</div><div class="big">{{ '{:,.0f}'.format(fair.fair_price_disp).replace(',', '.') }} €</div></div>
   {% if fair.current %}
   <div><div class="lbl">Angebotspreis</div><div class="big">{{ '{:,.0f}'.format(fair.current).replace(',', '.') }} €</div></div>
   {% if fair.eff %}
@@ -94,6 +93,9 @@
     <div class="muted" style="font-size:.72rem; max-width:22rem;" title="Warmmiete inkl. Heizung, Strom, Internet, Wasser, Müll, 1 PKW-Stellplatz">
       {% for label, v in fair.eff_parts %}{{ label }} {{ '{:,.0f}'.format(v).replace(',', '.') }} €{% if not loop.last %} + {% endif %}{% endfor %}</div></div>
   {% endif %}
+  {% endif %}
+  <div><div class="lbl">{{ 'Angemessene Warmmiete' if fair.eff else 'Angemessener Preis (ML)' }}</div><div class="big">{{ '{:,.0f}'.format(fair.fair_price_disp).replace(',', '.') }} €</div></div>
+  {% if fair.current %}
   {% if fair.fair_offer %}
   <div><div class="lbl">Angemessener Angebotspreis</div><div class="big">{{ '{:,.0f}'.format(fair.fair_offer).replace(',', '.') }} €</div></div>
   {% endif %}
