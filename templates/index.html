@@ -120,7 +120,7 @@
     <button class="btn btn-primary" onclick="openAdd()">+ Tracker per URL</button>
     <form method="post" action="{{ url_for('refresh_all') }}" style="margin-left:auto;">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-      <button class="btn btn-outline" type="submit">↻ Alle aktualisieren</button>
+      <button class="btn btn-outline refresh-btn" type="submit">↻ Alle aktualisieren</button>
     </form>
   </div>
 </div>
@@ -148,10 +148,8 @@
           <span class="badge {{ 'badge-green' if t.listing_count else 'badge-grey' }}">{{ t.listing_count }} listing{{ '' if t.listing_count == 1 else 's' }}</span>
         </td>
         <td style="padding:.5rem .4rem; text-align:right;">
-          <form method="post" action="{{ url_for('refresh_tracker', tracker_id=t.id) }}"
-                style="display:inline;" onsubmit="fetch(this.action,{method:'POST',headers:{'X-CSRF-Token':'{{ csrf_token() }}'}}).then(watchRefresh);this.querySelector('button').textContent='…';return false;">
-            <button class="btn btn-outline btn-sm" type="submit">↻</button>
-          </form>
+          <button class="btn btn-outline btn-sm refresh-btn" type="button" title="Nur diesen Tracker aktualisieren"
+                  onclick="refreshTracker({{ t.id }}, this)">↻</button>
           <form method="post" action="{{ url_for('pause_tracker', tracker_id=t.id) }}" style="display:inline;">
             <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
             <button class="btn btn-outline btn-sm" type="submit" title="{{ 'Pausieren (nicht mehr abfragen, einklappen)' if t.enabled else 'Fortsetzen' }}">{{ '⏸' if t.enabled else '▶' }}</button>
@@ -237,6 +235,10 @@
       <span id="gone-label"></span>
     </label>
     <h2 id="detail-title" style="margin:0; font-size:1.1rem;"></h2>
+    {% if session.logged_in %}
+    <button class="btn btn-outline btn-sm refresh-btn" type="button" title="Nur diesen Tracker aktualisieren"
+            onclick="refreshTracker(currentTrackerId, this)">↻ Aktualisieren</button>
+    {% endif %}
     <div id="sortbar">Sortieren:
       <select id="sort-key" onchange="setSortKey(this.value)">
         <option value="date">Datum (erstmals gesehen)</option>
@@ -284,11 +286,28 @@ const REFRESHING = {{ refreshing|tojson }};
 const CSRF = '{{ csrf_token() }}';
 const LOGGED_IN = {{ 'true' if session.logged_in else 'false' }};
 
-// ── auto-reload while a poll is running ─────────────────────────────────────
+// ── manual polls (only one at a time) + auto-reload while it runs ───────────
+function setRefreshBusy() {
+  document.querySelectorAll('.refresh-btn').forEach(b => {
+    b.disabled = true;
+    b.title = 'Es läuft bereits ein Poll';
+  });
+}
+
+async function refreshTracker(id, btn) {
+  if (id == null) return;
+  if (btn) btn.textContent = '…';
+  try {
+    await fetch('/tracker/' + id + '/refresh', {method: 'POST', headers: {'X-CSRF-Token': CSRF}});
+  } catch (e) { /* the status poll below shows what is running */ }
+  watchRefresh();
+}
+
 let _watching = false;
 function watchRefresh() {
   if (_watching) return;
   _watching = true;
+  setRefreshBusy();
   document.getElementById('poll-banner').classList.add('show');
   const tick = async () => {
     try {

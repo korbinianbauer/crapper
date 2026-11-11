@@ -77,8 +77,13 @@ count, summary}` (or an error) — the frontend calls it live as the user pastes
    membership; `db.add_price()` appends a `price_history` row (skipping
    consecutive duplicate prices).
 4. Deactivation recomputes each listing's `active` flag: active iff ≥1 membership
-   is active. Adding a tracker triggers an immediate background poll
-   (`_refresh_async`).
+   is active. Adding a tracker triggers an immediate background poll.
+5. Manual polls (`app._start_refresh`): "↻ Alle aktualisieren" starts **one thread per
+   source**, each a single `poller.poll_trackers()` over that source's trackers; the
+   ↻ button (tracker list and detail view) polls just that tracker. Only **one manual
+   poll at a time** — while one runs, `/refresh_status` lists its trackers, the
+   buttons are disabled and further requests get 409 (the initial poll of a new
+   tracker is exempt).
 
 ### Tracker detail view (`/tracker/<id>`)
 
@@ -215,7 +220,11 @@ schema (no `trackers.source` column). No backward compatibility is maintained.
   counts as an attempt or marks an ad inactive; the ad is retried first (after 3
   blocks in one poll: last). Items whose source is not ready within
   `MAX_POLL_WAIT` (4 h) of the poll's start are left for the next
-  poll, where they come first. Price rescue for search cards without a price
+  poll, where they come first. The pace state is only changed atomically
+  (`db.update_setting_atomic`, SQLite write lock) and each request first reserves
+  its slot (`poller._reserve`), so parallel polls — per-source threads, a manual and
+  the scheduled poll — share one interval per source and never send at once.
+  Price rescue for search cards without a price
   (`poll_stats.rescued`) happens in phase 2. Both sources raise `RateLimited` on
   HTTP 403/429 from ad pages.
 

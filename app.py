@@ -26,7 +26,7 @@ import pagearchive
 import db
 import ml
 import sources
-from poller import poll_tracker
+from poller import poll_trackers
 from sources.base import RateLimited
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
@@ -154,24 +154,33 @@ def logout():
 
 # ── refresh tracking ────────────────────────────────────────────────────────────
 
-_active_refreshes: set[int] = set()
+_active_refreshes: set[int] = set()     # trackers of the running manual poll
+_refresh_lock = threading.Lock()
 
 
-def _refresh_async(tracker_id: int):
-    tracker = db.get_tracker(tracker_id)
-    if not tracker:
-        return
-    _active_refreshes.add(tracker_id)
-
-    def _run():
-        try:
-            poll_tracker(tracker)
-        except Exception as e:
-            logger.error('Refresh failed for tracker %d: %s', tracker_id, e)
-        finally:
-            _active_refreshes.discard(tracker_id)
-
-    threading.Thread(target=_run, daemon=True).start()
+def _start_refresh(trackers: list[dict], force: bool = False) -> bool:
+    """Start a manual poll of *trackers*: one thread per source, each one poll over
+    that source's trackers (shared, prioritised ad-page queue). Only one manual poll
+    runs at a time — returns False if one is running, unless *force* (the initial
+    poll of a newly added tracker). Sources are paced across threads/processes."""
+    with _refresh_lock:
+        if _active_refreshes and not force:
+            return False
+        _active_refreshes.update(t['id'] for t in trackers)
+    by_source: dict[str, list[dict]] = {}
+    for t in trackers:
+        by_source.setdefault(t['source'], []).append(t)
+    for group in by_source.values():
+        def _run(group=group):
+            try:
+                poll_trackers(group)
+            except Exception as e:
+                logger.error('Refresh failed for trackers %s: %s', [t['id'] for t in group], e)
+            finally:
+                with _refresh_lock:
+                    _active_refreshes.difference_update(t['id'] for t in group)
+        threading.Thread(target=_run, daemon=True).start()
+    return True
 
 
 # ── index ───────────────────────────────────────────────────────────────────────
@@ -844,7 +853,7 @@ def add_tracker():
 
     label = label_in or info.label or source.display_name
     tracker_id = db.add_tracker(source.name, info.type, label, url)
-    _refresh_async(tracker_id)
+    _start_refresh([db.get_tracker(tracker_id)], force=True)
     return redirect(url_for('index'))
 
 
@@ -884,9 +893,11 @@ def reorder_trackers():
 @login_required
 @csrf_protect
 def refresh_tracker(tracker_id):
-    if tracker_id in _active_refreshes:
-        return jsonify({'status': 'running'}), 202
-    _refresh_async(tracker_id)
+    tracker = db.get_tracker(tracker_id)
+    if not tracker:
+        return jsonify({'status': 'not found'}), 404
+    if not _start_refresh([tracker]):
+        return jsonify({'status': 'busy', 'running': list(_active_refreshes)}), 409
     return jsonify({'status': 'started'}), 202
 
 
@@ -894,8 +905,8 @@ def refresh_tracker(tracker_id):
 @login_required
 @csrf_protect
 def refresh_all():
-    for t in db.get_trackers(enabled_only=True):
-        _refresh_async(t['id'])
+    if not _start_refresh(db.get_trackers(enabled_only=True)):
+        flash('Es läuft bereits ein Poll — bitte warten, bis er fertig ist.', 'error')
     return redirect(url_for('index'))
 
 

@@ -55,17 +55,22 @@ BACKOFF_GROWTH = 2.0
 BACKOFF_DECAY = 0.9
 LIMITED_TO_BACK = 3                      # an ad blocked this often in one poll is retried last
 MAX_POLL_WAIT = timedelta(hours=4)       # a poll gives up on items not due within this of its start
+IN_FLIGHT = timedelta(minutes=2)         # slot reserved for a running request (crash safety)
+
+# All reads/writes of the pace state go through db.update_setting_atomic (SQLite write
+# lock), so parallel polls — threads of the web server or the scheduled poll process —
+# share one interval per source and never send at the same time.
 
 
 def _block_key(source) -> str:
     return f'detail_block_{source.name}'
 
 
-def _pace_state(source) -> dict:
+def _parse_pace(raw: str) -> dict:
     """{'delay': interval in s, 'next': ISO time the next request may go out (or None)}.
     Defaults for a source with no history."""
     try:
-        st = json.loads(db.get_setting(_block_key(source), '') or 'null') or {}
+        st = json.loads(raw or 'null') or {}
         delay = float(st['delay']) if 'delay' in st else BACKOFF_MIN.total_seconds()
         nxt = st.get('next') or st.get('until')          # 'until': pre-interval format
         datetime.fromisoformat(nxt) if nxt else None
@@ -74,36 +79,56 @@ def _pace_state(source) -> dict:
         return {'delay': BACKOFF_MIN.total_seconds(), 'next': None}
 
 
+def _pace_state(source) -> dict:
+    return _parse_pace(db.get_setting(_block_key(source), ''))
+
+
 def _ready_at(source) -> datetime:
     """When this source's next ad-page request may go out (≤ now: right away)."""
     nxt = _pace_state(source)['next']
     return datetime.fromisoformat(nxt) if nxt else datetime.min
 
 
-def _pace(source, st: dict, factor: float):
+def _reserve(source) -> bool:
+    """Atomically claim the source's next request slot. False if it is not free yet
+    (another poll got it first). The slot is held IN_FLIGHT until the request's
+    outcome reschedules it (`_pace`)."""
+    def fn(raw):
+        st = _parse_pace(raw)
+        now = datetime.utcnow()
+        if st['next'] and datetime.fromisoformat(st['next']) > now:
+            return None, False
+        st['next'] = (now + IN_FLIGHT).isoformat()
+        return json.dumps(st), True
+    return db.update_setting_atomic(_block_key(source), fn)
+
+
+def _pace(source, factor: float) -> dict:
     """Scale the interval by *factor* (clamped) and schedule the next request."""
-    st['delay'] = min(max(st['delay'] * factor, BACKOFF_MIN.total_seconds()),
-                      BACKOFF_MAX.total_seconds())
-    st['next'] = (datetime.utcnow() + timedelta(seconds=st['delay'])).isoformat()
-    db.set_setting(_block_key(source), json.dumps(st))
+    def fn(raw):
+        st = _parse_pace(raw)
+        st['delay'] = min(max(st['delay'] * factor, BACKOFF_MIN.total_seconds()),
+                          BACKOFF_MAX.total_seconds())
+        st['next'] = (datetime.utcnow() + timedelta(seconds=st['delay'])).isoformat()
+        return json.dumps(st), st
+    return db.update_setting_atomic(_block_key(source), fn)
 
 
 def _register_block(source):
     """Rate-limited (403/429): double the interval; the next request waits for it."""
-    st = _pace_state(source)
-    _pace(source, st, BACKOFF_GROWTH)
+    st = _pace(source, BACKOFF_GROWTH)
     logger.warning('%s ad pages rate-limited — interval now %s (next request %s UTC)',
                    source.name, timedelta(seconds=round(st['delay'])), st['next'][11:19])
 
 
 def _note_success(source):
     """An ad-page request that was not rate-limited: interval −10 %."""
-    _pace(source, _pace_state(source), BACKOFF_DECAY)
+    _pace(source, BACKOFF_DECAY)
 
 
 def _note_attempt(source):
     """A request that failed otherwise (network error …): keep the interval."""
-    _pace(source, _pace_state(source), 1.0)
+    _pace(source, 1.0)
 
 
 class _DetailJob:
@@ -163,6 +188,7 @@ def _drain(queue: list, started: datetime):
     are left for the next poll (where they come first, as least recently attempted)."""
     queue = list(queue)
     limited: dict[int, int] = {}
+    logged_wait = None
     while queue:
         ready = {src: _ready_at(src) for src in {i[0] for i in queue}}
         now = datetime.utcnow()
@@ -175,11 +201,16 @@ def _drain(queue: list, started: datetime):
                                soonest.isoformat(timespec='seconds'))
                 return
             wait = (soonest - now).total_seconds()
-            if wait >= 60:
+            if wait >= 60 and soonest != logged_wait:
+                logged_wait = soonest
                 logger.info('Waiting %s for the rate-limit interval (%d ad pages left)',
                             timedelta(seconds=round(wait)), len(queue))
-            time.sleep(wait)
+            # Re-check at least every second: a slot held IN_FLIGHT by another poll
+            # is released as soon as its request is done.
+            time.sleep(min(wait, 1.0))
             continue
+        if not _reserve(queue[idx][0]):
+            continue                      # another poll took this source's slot
         item = queue.pop(idx)
         try:
             item[2]()
@@ -188,12 +219,19 @@ def _drain(queue: list, started: datetime):
             queue.insert(len(queue) if n % LIMITED_TO_BACK == 0 else idx, item)
         except Exception as e:
             logger.error('%s failed: %s', item[1], e)
+            _note_attempt(item[0])        # release the reserved slot
 
 
 def poll_tracker(tracker: dict):
     """Refresh a single tracker. Used by the 'refresh now' button and the initial
     poll on add."""
     _poll([tracker])
+
+
+def poll_trackers(trackers: list[dict]):
+    """Refresh several trackers as one poll (shared, prioritised ad-page queue).
+    Used by 'refresh all' — one call per source, each in its own thread."""
+    _poll(trackers)
 
 
 def poll_all_due():

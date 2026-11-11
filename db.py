@@ -285,6 +285,27 @@ def set_setting(key: str, value: str):
         conn.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', (key, value))
 
 
+def update_setting_atomic(key: str, fn):
+    """Read-modify-write of one setting under SQLite's write lock (BEGIN IMMEDIATE),
+    so concurrent threads *and* processes (web server, scheduled poll) serialise.
+    *fn(old_value)* returns (new_value or None to leave it, result); returns result."""
+    conn = sqlite3.connect(DB_PATH, timeout=60, isolation_level=None)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        r = conn.execute('SELECT value FROM settings WHERE key = ?', (key,)).fetchone()
+        new, result = fn(r[0] if r else '')
+        if new is not None:
+            conn.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', (key, new))
+        conn.execute('COMMIT')
+        return result
+    except Exception:
+        if conn.in_transaction:
+            conn.execute('ROLLBACK')
+        raise
+    finally:
+        conn.close()
+
+
 def get_all_settings() -> dict[str, str]:
     with get_db() as conn:
         return {r[0]: r[1] for r in conn.execute('SELECT key, value FROM settings')}
