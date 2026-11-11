@@ -59,8 +59,8 @@
             {% else %}Modell trainieren{% endif %}</button>
         </form>
         <div class="hint">Trainiert mit allen aktuellen Anzeigen, für die bereits Features eingetragen sind
-          (Anzeigen mit unplausiblem Preis werden ausgeschlossen). Aus Ridge, SVR, Random Forest und Gradient
-          Boosting wird per Kreuzvalidierung das beste gewählt; das dauert etwa eine Minute. Ältere Modelle
+          (Anzeigen mit unplausiblem Preis werden ausgeschlossen). Es wird ein Gradient-Boosting-Modell
+          trainiert (Kreuzvalidierung zur Bewertung); das dauert etwa eine Minute. Ältere Modelle
           bleiben erhalten (die letzten {{ 10 }}).</div>
         {% if fs.train and fs.train.status != 'running' %}
         <div class="tbox {{ 'err' if fs.train.status == 'error' }}">{{ fs.train.msg }}</div>

@@ -135,7 +135,7 @@ price and the ML rating (`fair_delta` = asking price vs. fair price in %, negati
   num|bool|cat) belongs to one tracker; values per listing are extracted **by an LLM agent
   reading each ad by hand — there is deliberately no extraction script/regex**; the agent writes the values straight into the DB
   via `db.save_listing_features(feature_set_id, {listing_id: {feature: value}})` (inline Python on the server, venv).
-  `python ml.py train <set>` picks the best of ridge/SVR/random forest/gradient boosting by
+  `python ml.py train <set>` trains a gradient boosting model (the only candidate; ridge/SVR/random forest were removed), scored by
   repeated 5-fold CV on log(price), stores the model (last 10 per set are kept) and writes
   `fair_prices`: training listings get their out-of-fold prediction, all others (excluded
   or new) the stored model's — so every stored fair price is made without knowing that

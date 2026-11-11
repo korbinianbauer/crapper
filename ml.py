@@ -75,7 +75,7 @@ def _cost_row(features, cost):
 
 
 def _fit_small(rows, y, features, minimum):
-    """Tiny regression for the cost sub-models: best of ridge / random forest / gradient boosting by CV MAE."""
+    """Tiny regression for the cost sub-models: gradient boosting, CV MAE."""
     from sklearn.model_selection import KFold, cross_val_predict
     if len(rows) < minimum:
         return None
@@ -83,8 +83,6 @@ def _fit_small(rows, y, features, minimum):
     X, y = enc.transform(rows), np.asarray(y, float)
     best = None
     for name, make in _candidates().items():
-        if name == 'svr':
-            continue
         pred = cross_val_predict(make(), X, np.log(y), cv=KFold(5, shuffle=True, random_state=0))
         mae = float(np.mean(np.abs(np.exp(pred) - y)))
         if best is None or mae < best[0]:
@@ -243,16 +241,8 @@ class Encoder:
 
 
 def _candidates():
-    from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
-    from sklearn.linear_model import RidgeCV
-    from sklearn.pipeline import make_pipeline
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.svm import SVR
+    from sklearn.ensemble import GradientBoostingRegressor
     return {
-        'ridge': lambda: make_pipeline(StandardScaler(), RidgeCV(alphas=np.logspace(-2, 3, 20))),
-        'svr': lambda: make_pipeline(StandardScaler(), SVR(C=3.0, epsilon=0.05, gamma='scale')),
-        'random_forest': lambda: RandomForestRegressor(n_estimators=300, min_samples_leaf=2,
-                                                       random_state=0, n_jobs=1),
         'gradient_boosting': lambda: GradientBoostingRegressor(
             n_estimators=250, learning_rate=0.04, max_depth=3, subsample=0.8,
             min_samples_leaf=3, random_state=0),

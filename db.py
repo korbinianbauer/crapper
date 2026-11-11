@@ -195,6 +195,10 @@ def init_db():
         if 'position' not in {r[1] for r in conn.execute('PRAGMA table_info(trackers)')}:
             conn.execute('ALTER TABLE trackers ADD COLUMN position INTEGER NOT NULL DEFAULT 0')
             conn.execute('UPDATE trackers SET position = id')   # keep the existing order
+        # Only gradient boosting is supported: drop models of any other algorithm (+ their predictions).
+        conn.execute("DELETE FROM fair_prices WHERE model_id IN "
+                     "(SELECT id FROM ml_models WHERE algo != 'gradient_boosting')")
+        conn.execute("DELETE FROM ml_models WHERE algo != 'gradient_boosting'")
         # Seed v1 for listings that predate versioning.
         conn.execute('''
             INSERT INTO listing_versions (listing_id, version, fetched_at, title, location,
