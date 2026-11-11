@@ -727,7 +727,7 @@ def refresh_all():
 
 # ── settings ───────────────────────────────────────────────────────────────────
 
-SETTINGS_PAGES = [('fair_pricing', 'Fair-Pricing-Modell')]
+SETTINGS_PAGES = [('fair_pricing', 'Angemessener-Preis-Modell')]
 _trainings: dict[int, dict] = {}      # feature_set_id -> {status: running|done|error, msg}
 
 
@@ -823,7 +823,7 @@ def settings_select_model(fs_id):
         ml.predict(fs['name'], model_id=model_id)
     except SystemExit as e:
         flash(str(e), 'error')
-    flash(f'Modell {model_id} wird jetzt für den fairen Preis verwendet.', 'ok')
+    flash(f'Modell {model_id} wird jetzt für den angemessenen Preis verwendet.', 'ok')
     return redirect(url_for('settings_fair_pricing'))
 
 

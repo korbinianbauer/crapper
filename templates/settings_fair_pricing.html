@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Settings · Fair-Pricing-Modell · crapper{% endblock %}
+{% block title %}Settings · Angemessener-Preis-Modell · crapper{% endblock %}
 {% block head %}
 <style>
   .settings { display:grid; grid-template-columns:13rem 1fr; gap:1.5rem; align-items:start; }
@@ -38,7 +38,7 @@
   </nav>
 
   <div>
-    <h2>Fair-Pricing-Modell</h2>
+    <h2>Angemessener-Preis-Modell</h2>
 
     {% for fs in sets %}
     <div class="card fs" data-fs="{{ fs.id }}">
@@ -92,7 +92,7 @@
           <button class="btn btn-outline btn-sm" type="submit" style="margin-top:.75rem;">Ausgewähltes Modell verwenden</button>
         </form>
         <div class="hint">Fehler = Kreuzvalidierung auf den Trainingsanzeigen. Das aktive Modell bestimmt den
-          fairen Preis überall (Tracker-Ansicht, Archiv, neue Anzeigen).</div>
+          angemessenen Preis überall (Tracker-Ansicht, Archiv, neue Anzeigen).</div>
         {% else %}
         <div class="muted" style="font-size:.9rem;">Noch kein Modell trainiert.</div>
         {% endif %}
@@ -133,9 +133,9 @@
                    placeholder="z. B. -10"></div>
           <button class="btn btn-primary" type="submit">Speichern</button>
         </form>
-        <div class="hint">Korrigiert den Fair Price manuell: <b>-10</b> zeigt immer einen 10&nbsp;% niedrigeren Preis
+        <div class="hint">Korrigiert den angemessenen Preis manuell: <b>-10</b> zeigt immer einen 10&nbsp;% niedrigeren Preis
           als die ML-Vorhersage an. Damit lässt sich der Unterschied zwischen Angebotspreisen und tatsächlichen
-          Abschlüssen ausgleichen. Wirkt sofort auf Fair Price und Bewertung (unter/über fair); gespeichert
+          Abschlüssen ausgleichen. Wirkt sofort auf den angemessenen Preis und die Bewertung (unter/über angemessen); gespeichert
           werden weiterhin die unveränderten Vorhersagen.
           {% if fs.stats %}<br>Zur Orientierung: Die Angebotspreise von {{ fs.stats.n }} Anzeigen liegen im Median
           <b>{{ '%+g'|format(fs.stats.median_pct) }} %</b> gegenüber der reinen ML-Vorhersage des aktiven Modells
@@ -149,7 +149,7 @@
       <h2>Tracker ohne Feature-Set</h2>
       <div class="hint" style="margin-top:0;">Für diese Tracker kann hier noch kein Modell trainiert werden: Es fehlen die
         Merkmals-Definition und die Merkmalswerte der Anzeigen. Beides legt ein LLM-Agent von Hand an (siehe CLAUDE.md,
-        Abschnitt „ML fair price“). Danach erscheint der Tracker oben, und ab 30 Anzeigen mit Features lässt sich ein Modell
+        Abschnitt „ML angemessener Preis“). Danach erscheint der Tracker oben, und ab 30 Anzeigen mit Features lässt sich ein Modell
         trainieren.</div>
       <table class="models" style="margin-top:.75rem;">
         <tr><th>Tracker</th><th>Quelle</th><th>Anzeigen</th></tr>

@@ -371,7 +371,7 @@ function esc(s) {
 // Rating = asking price vs. fair asking price (negative = cheaper than fair).
 function ratingLabel(d) {
   return d >= 25 ? ['sehr teuer', 'dear'] : d >= 10 ? ['teuer', 'dear']
-       : d <= -25 ? ['sehr günstig', 'cheap'] : d <= -10 ? ['günstig', 'cheap'] : ['fair', ''];
+       : d <= -25 ? ['sehr günstig', 'cheap'] : d <= -10 ? ['günstig', 'cheap'] : ['angemessen', ''];
 }
 function ratingInline(c) {          // appended to the price row
   if (c.fair_delta == null) return '';
@@ -383,15 +383,15 @@ function ratingHtml(c) {            // detail lines below the price row
   if (c.fair_price == null) return '';
   const eur = v => v.toLocaleString('de-DE') + ' €';
   if (c.fair_delta == null)
-    return `<div class="rating" title="Preis nicht plausibel – keine Einordnung">Fairer Preis ${eur(c.fair_price)}</div>`;
+    return `<div class="rating" title="Preis nicht plausibel – keine Einordnung">Angemessener Preis ${eur(c.fair_price)}</div>`;
   if (c.eff_price) {
     const tip = 'Normierte Warmmiete inkl. Heizung, Strom, Internet, Wasser, Müllabfuhr und 1 PKW-Stellplatz (Details im Archiv)';
     return `<div class="rating" title="${tip}">
       <div>Normierte Warmmiete ${eur(c.eff_price)}</div>
-      <div>Faire Warmmiete ${eur(c.fair_price)}</div>
-      ${c.fair_offer ? `<div>Fairer Angebotspreis ${eur(c.fair_offer)}</div>` : ''}</div>`;
+      <div>Angemessene Warmmiete ${eur(c.fair_price)}</div>
+      ${c.fair_offer ? `<div>Angemessener Angebotspreis ${eur(c.fair_offer)}</div>` : ''}</div>`;
   }
-  return `<div class="rating"><div>Fairer Preis ${eur(c.fair_price)}</div></div>`;
+  return `<div class="rating"><div>Angemessener Preis ${eur(c.fair_price)}</div></div>`;
 }
 
 // Gallery on the cards: photos are fetched once per listing (/listing/<id>/images), then browsed in place.
