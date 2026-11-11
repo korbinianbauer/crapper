@@ -1,5 +1,8 @@
 import difflib
 import hmac
+import io
+import json
+import zipfile
 import re
 import logging
 import math
@@ -450,6 +453,91 @@ def listing_images(listing_id):
     return resp
 
 
+@app.route('/listing/<int:listing_id>/export.zip')
+@login_required
+def listing_export(listing_id):
+    """ZIP with everything about one ad: full-size photos, title, text, extracted metadata
+    and the normalised / fair prices as JSON."""
+    listing = db.get_listing(listing_id)
+    if not listing:
+        abort(404)
+    versions = db.get_versions(listing_id)                      # newest first
+    if not versions:
+        abort(404)
+    cur = versions[0]
+    src = sources.get(listing['source'])
+    prices = db.get_price_history(listing_id)
+    fair = _fair_info(listing_id, prices)
+    photos = {}
+    for u in db.get_version_images(listing_id, cur['version']) or ([cur['image_url']] if cur['image_url'] else []):
+        if 'logo-kleinanzeigen' in u:
+            continue
+        photos.setdefault(src.full_image_url(u), []).append(u)
+    buf = io.BytesIO()
+    files = []
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+        for n, (full, variants) in enumerate(photos.items(), 1):
+            name = next(filter(None, (archive.local_name(u) for u in [full, *variants])), None) \
+                or archive.download_image(full)
+            path = os.path.join(archive.IMG_DIR, name) if name else None
+            if path and os.path.exists(path):
+                arc = 'images/%02d%s' % (n, os.path.splitext(name)[1])
+                z.write(path, arc)
+                files.append(arc)
+        data = {
+            'id': listing['id'], 'source': listing['source'], 'ad_id': listing.get('ad_id'),
+            'url': listing['url'], 'title': cur['title'], 'location': cur['location'],
+            'description': cur['description'], 'version': cur['version'], 'fetched_at': cur['fetched_at'],
+            'price_history': [{'t': p['observed_at'], 'price': p['price'], 'label': p['price_text']} for p in prices],
+            'images': files,
+            'metadata': dict(fair['features']) if fair else None,
+            'cost': fair['cost'] if fair else None,
+            'normalised_warm_rent': round(fair['eff']) if fair and fair['eff'] else None,
+            'fair_warm_rent': fair['fair_price_disp'] if fair else None,
+            'fair_offer_price': fair['fair_offer'] if fair else None,
+            'current_price': fair['current'] if fair else None,
+        }
+        z.writestr('listing.json', json.dumps(data, ensure_ascii=False, indent=2, default=str))
+        z.writestr('text.txt', '%s\n\n%s\n\n%s\n' % (cur['title'] or '', cur['location'] or '', cur['description'] or ''))
+    buf.seek(0)
+    return Response(buf.getvalue(), mimetype='application/zip', headers={
+        'Content-Disposition': 'attachment; filename="anzeige-%s-%s.zip"' % (listing['source'], listing_id)})
+
+
+def _fair_info(listing_id, prices):
+    """Fair-price details of a listing (None without a prediction): normalised rent `eff`,
+    fair price, fair offer, delta, facts …"""
+    fair = db.get_fair_price(listing_id)
+    if not fair:
+        return None
+    cur_price = next((p['price'] for p in reversed(prices) if p['price'] is not None), None)
+    fair['current'] = cur_price
+    fair['plausible'] = ml.is_plausible(cur_price, fair['features'], fair['metrics'].get('per'), fair['metrics'].get('per_range'))
+    fair['eff'], fair['eff_parts'] = ml.effective_breakdown(cur_price, fair.get('cost'), fair['features'],
+                                                           fair['metrics'].get('cost_assumptions'),
+                                                           ml.cost_models_for(fair['model_id']))
+    if not fair['eff_parts']:
+        fair['eff'] = None
+    base = fair['eff'] or cur_price
+    fair['fair_price_disp'] = _round_display(fair['fair_price'])
+    fair['fair_offer'] = _fair_offer(fair['fair_price_disp'], fair['eff'], cur_price) if fair['eff'] else None
+    ref = fair['fair_offer'] or fair['fair_price_disp']
+    fair['delta_pct'] = round((cur_price / ref - 1) * 100) if cur_price and ref else None
+    m = fair['metrics']
+    fair['mae'] = m['candidates'][m['chosen']]['mae']
+    fair['median_ape'] = round(m['candidates'][m['chosen']]['median_ape'] * 100)
+    feats = {f['key']: f for f in fair['definition']['features']}
+    def show(f, v):
+        if v is None:
+            return 'unbekannt'
+        if f['type'] == 'bool':
+            return 'Ja' if v else 'Nein'
+        return int(v) if isinstance(v, float) and v.is_integer() else v
+    fair['facts'] = [(f['label'], show(f, fair['features'].get(f['key'])))
+                     for f in fair['definition']['features']]
+    return fair
+
+
 @app.route('/listing/<int:listing_id>/archive')
 def listing_archive(listing_id):
     """Wayback-style view: newest archived version by default, timeline of all versions."""
@@ -499,33 +587,7 @@ def listing_archive(listing_id):
             ('price', price_at(idx - 1), price))}
         diff = {k: {'segs': v, 'changed': any(op != 'eq' for op, _ in v)} for k, v in diff.items()}
         diff['images'] = {'changed': bool(removed_images or any(i['new'] for i in images))}
-    fair = db.get_fair_price(listing_id)
-    if fair:
-        cur_price = next((p['price'] for p in reversed(prices) if p['price'] is not None), None)
-        fair['current'] = cur_price
-        fair['plausible'] = ml.is_plausible(cur_price, fair['features'], fair['metrics'].get('per'), fair['metrics'].get('per_range'))
-        fair['eff'], fair['eff_parts'] = ml.effective_breakdown(cur_price, fair.get('cost'), fair['features'],
-                                                               fair['metrics'].get('cost_assumptions'),
-                                                               ml.cost_models_for(fair['model_id']))
-        if not fair['eff_parts']:
-            fair['eff'] = None
-        base = fair['eff'] or cur_price
-        fair['fair_price_disp'] = _round_display(fair['fair_price'])
-        fair['fair_offer'] = _fair_offer(fair['fair_price_disp'], fair['eff'], cur_price) if fair['eff'] else None
-        ref = fair['fair_offer'] or fair['fair_price_disp']
-        fair['delta_pct'] = round((cur_price / ref - 1) * 100) if cur_price and ref else None
-        m = fair['metrics']
-        fair['mae'] = m['candidates'][m['chosen']]['mae']
-        fair['median_ape'] = round(m['candidates'][m['chosen']]['median_ape'] * 100)
-        feats = {f['key']: f for f in fair['definition']['features']}
-        def show(f, v):
-            if v is None:
-                return 'unbekannt'
-            if f['type'] == 'bool':
-                return 'Ja' if v else 'Nein'
-            return int(v) if isinstance(v, float) and v.is_integer() else v
-        fair['facts'] = [(f['label'], show(f, fair['features'].get(f['key'])))
-                         for f in fair['definition']['features']]
+    fair = _fair_info(listing_id, prices)
     source_names = {s.name: s.display_name for s in sources.all_sources()}
     raw = db.get_version_html(listing_id, cur['version']) if cur['has_html'] else None
     has_page = bool(raw) and not raw.lstrip().startswith('{')   # ImmoScout archives JSON, not a page

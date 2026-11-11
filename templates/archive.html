@@ -115,6 +115,7 @@
 <div class="wb-tabs">
   {% if has_page %}<a class="{{ 'on' if view == 'page' }}" href="?v={{ cur.version }}&view=page">Originalansicht</a>{% endif %}
   <a class="{{ 'on' if view == 'data' }}" href="?v={{ cur.version }}&view=data">Extrahierte Daten &amp; Änderungen</a>
+  {% if session.get('logged_in') %}<a href="{{ url_for('listing_export', listing_id=listing.id) }}">ZIP-Export</a>{% endif %}
 </div>
 
 {% if view == 'page' %}
