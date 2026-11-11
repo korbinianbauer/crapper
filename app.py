@@ -255,6 +255,15 @@ def _price_index(items: list[dict], today: date | None = None,
     return out
 
 
+def _round_display(x):
+    """Display rounding of a fair price: two digits plus one digit that is 0 or 5
+    (978 -> 980, 1234 -> 1250, 245678 -> 245000)."""
+    if not x or x <= 0:
+        return x
+    step = 5 * 10 ** (int(math.floor(math.log10(x))) - 2)
+    return int(round(x / step) * step) if step >= 1 else round(x)
+
+
 @app.route('/', defaults={'tracker_id': None})
 @app.route('/tracker/<int:tracker_id>')
 def index(tracker_id):
@@ -281,14 +290,14 @@ def index(tracker_id):
         price_num = latest_num['price'] if latest_num else None
         fair_price = fair_delta = eff_price = None
         if fair:
-            fair_price = round(fair['fair_price'])
+            fair_price = _round_display(fair['fair_price'])
             # rents are compared as normalised Warmmiete (incl. Heizung, Strom, Internet, … see ml.effective_price)
             eff = ml.effective_price(price_num, fair.get('cost'), fair['features'], fair.get('assume'),
                                      ml.cost_models_for(fair.get('model_id')))
             if eff is not None and price_num and eff != price_num:
                 eff_price = round(eff)
             if price_num and ml.is_plausible(price_num, fair['features'], fair['per'], fair.get('per_range')):
-                fair_delta = round((eff / fair['fair_price'] - 1) * 100)   # + = above fair
+                fair_delta = round((eff / fair_price - 1) * 100)   # + = above fair
         cards[l['id']] = {
             'id': l['id'],
             'source': l['source'],
@@ -486,7 +495,8 @@ def listing_archive(listing_id):
         if not fair['eff_parts']:
             fair['eff'] = None
         base = fair['eff'] or cur_price
-        fair['delta_pct'] = round((base / fair['fair_price'] - 1) * 100) if base else None
+        fair['fair_price_disp'] = _round_display(fair['fair_price'])
+        fair['delta_pct'] = round((base / fair['fair_price_disp'] - 1) * 100) if base else None
         m = fair['metrics']
         fair['mae'] = m['candidates'][m['chosen']]['mae']
         fair['median_ape'] = round(m['candidates'][m['chosen']]['median_ape'] * 100)

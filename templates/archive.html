@@ -86,7 +86,7 @@
 </div>
 {% if fair %}
 <div class="card fair">
-  <div><div class="lbl">Fairer Preis (ML)</div><div class="big">{{ '{:,.0f}'.format(fair.fair_price).replace(',', '.') }} €</div></div>
+  <div><div class="lbl">Fairer Preis (ML)</div><div class="big">{{ '{:,.0f}'.format(fair.fair_price_disp).replace(',', '.') }} €</div></div>
   {% if fair.current %}
   <div><div class="lbl">Angebotspreis</div><div class="big">{{ '{:,.0f}'.format(fair.current).replace(',', '.') }} €</div></div>
   {% if fair.eff %}
