@@ -24,7 +24,7 @@ import db
 MIN_TRAIN = 30                      # refuse to train on fewer priced listings
 # Plausible €/unit window for target-price sanity filtering, keyed by feature-set
 # `price_per` (a numeric feature the price is normally proportional to).
-SANE_PER_UNIT = {'wohnflaeche': (4.0, 40.0)}      # default (rent); a feature set can override via definition['plausible']
+SANE_PER_UNIT = {'wohnflaeche': (4.0, 60.0)}      # default (rent); a feature set can override via definition['plausible']
 
 
 # ── normalised rent ("Warmmiete inkl. Heizung, Strom, Internet, Wasser, Müll, 1 PKW-Stellplatz") ──

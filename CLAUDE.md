@@ -139,7 +139,7 @@ price and the ML rating (`fair_delta` = asking price vs. fair price in %, negati
   repeated 5-fold CV on log(price), stores the model (last 10 per set are kept) and writes
   `fair_prices`: training listings get their out-of-fold prediction, all others (excluded
   or new) the stored model's — so every stored fair price is made without knowing that
-  listing's price (`oof` is always 1; kept for schema compatibility). Listings with implausible prices (€/m² outside 4–40) are excluded from training.
+  listing's price (`oof` is always 1; kept for schema compatibility). Listings with implausible prices (€/m² outside 4–60) are excluded from training.
   Training is triggered by hand (settings page or CLI); new listings are scored with the **active** model (`ml.predict`,
   no retraining) — run `ml.predict(<set>, ids)` right after saving their features
   (or `python ml.py predict <set>` for any with features but no prediction). The archive view
