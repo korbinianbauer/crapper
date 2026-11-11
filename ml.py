@@ -175,34 +175,80 @@ def effective_breakdown(price, cost, features, assume, cmodels=None):
     return sum(v for _, v in parts), parts
 
 
-def kalt_rent(price, cost, features, assume, cmodels=None):
-    """(Kaltmiete, estimated) for a rent listing. Basis kalt: the asking price as stated in the ad.
-    Basis warm: asking price minus the Nebenkosten/Heizung (ML estimate) and Strom/Internet it contains.
-    (None, False) without cost data."""
+def rent_breakdown(price, cost, features, assume, cmodels=None):
+    """The normalised Warmmiete split up from the Kaltmiete, for the archive bar chart:
+    {kalt, kalt_est, parts: [{key, label, eur, assumed}], flags: [{label, eur}], total} or None.
+    Basis kalt: Kaltmiete = asking price. Basis warm: asking price minus the (estimated) Nebenkosten,
+    Heizung, Strom and Internet it contains. `parts` are ordered so that everything contained in the
+    asking price (+ stated Nebenkosten) comes first; `flags` are the amounts stated in the ad, at their
+    cumulative position. `assumed` = not priced in the ad (flat-rate assumption or ML estimate).
+    `total` equals effective_breakdown()'s total."""
     if not cost or price is None or not assume:
-        return None, False
-    if cost.get('basis') == 'kalt':
-        return price, False
+        return None
     a = {**DEFAULT_COSTS, **assume}
-    legacy = 'strom' in assume and 'strom_kwh' not in assume
+    legacy = 'strom' in assume and 'strom_kwh' not in assume          # models trained before energy prices
     wf = (features or {}).get('wohnflaeche') or 0
     incl, extra = set(cost.get('incl') or []), set(cost.get('extra') or [])
-    if legacy:
-        sub = a['nk_m2'] * wf
+    warm = cost.get('basis') != 'kalt'
+    add = cost.get('add')
+    strom = a['strom'] if legacy else a['strom_verbrauch'] * a['strom_kwh'] / 12
+
+    def heat():
+        return a['heizung_m2'] * wf if legacy else heating_eur(cost, features, a, cmodels)
+
+    def part(key, label, eur, assumed=True):
+        return {'key': key, 'label': label, 'eur': eur, 'assumed': assumed}
+
+    inner = []                                # contained in price (+ stated Nebenkosten)
+    if warm or add is None:
+        if legacy:
+            inner.append(part('nk', 'Nebenkosten', round(a['nk_m2'] * wf)))
+        else:
+            nk = _predict_small((cmodels or {}).get('nk'), _cost_row(features, cost))
+            nk = nk if nk else 2.0 * wf
+            if warm:                          # Wasser/Müll billed separately are not in this price
+                nk -= sum(a[k] for k in ('wasser', 'muell') if k in extra)
+            inner.append(part('nk', 'Betriebskosten', round(nk)))
+            if not (warm and 'heizung' in extra):
+                inner.append(part('heizung', 'Heizung', round(heat())))
+    elif add:
+        inner.append(part('nk', 'Nebenkosten/Heizung', add, False))
+    if warm:
+        if 'strom' in incl:
+            inner.append(part('strom', 'Strom', round(strom)))
+        if 'internet' in incl:
+            inner.append(part('internet', 'Internet', round(a['internet'])))
+        kalt = price - sum(p['eur'] for p in inner)
+        flags = [{'label': 'Warmmiete lt. Anzeige', 'eur': price}]
     else:
-        nk = _predict_small((cmodels or {}).get('nk'), _cost_row(features, cost))
-        sub = (nk if nk else 2.0 * wf)
-        if 'heizung' not in extra:
-            sub += heating_eur(cost, features, a, cmodels)
-    for k in ('wasser', 'muell'):          # part of the Betriebskosten estimate, but not in this price
+        kalt = price
+        flags = [{'label': 'Kaltmiete lt. Anzeige', 'eur': price}]
+        if add:
+            flags.append({'label': 'Warmmiete lt. Anzeige', 'eur': price + add})
+    outer = []                                # added on top to normalise
+    for k in ('strom', 'internet', 'stellplatz'):
+        if k in incl:
+            continue
+        if k == 'stellplatz' and cost.get('sp') is not None:
+            outer.append(part(k, COST_LABELS[k], round(cost['sp']), False))
+        else:
+            outer.append(part(k, COST_LABELS[k], round(strom if k == 'strom' else a[k])))
+    if 'heizung' in extra:
+        outer.append(part('heizung', 'Heizung', round(heat())))
+    for k in ('wasser', 'muell'):
         if k in extra:
-            sub -= a[k]
-    if 'strom' in incl:
-        sub += a['strom'] if legacy else a['strom_verbrauch'] * a['strom_kwh'] / 12
-    if 'internet' in incl:
-        sub += a['internet']
-    kalt = price - sub
-    return (round(kalt), True) if kalt > 0 else (None, True)
+            outer.append(part(k, COST_LABELS[k], a[k]))
+    if kalt <= 0:
+        return None
+    parts = inner + outer
+    return {'kalt': kalt, 'kalt_est': warm, 'parts': parts, 'flags': flags,
+            'total': kalt + sum(p['eur'] for p in parts)}
+
+
+def kalt_rent(price, cost, features, assume, cmodels=None):
+    """(Kaltmiete, estimated) for a rent listing; (None, False) without cost data."""
+    rb = rent_breakdown(price, cost, features, assume, cmodels)
+    return (round(rb['kalt']), rb['kalt_est']) if rb else (None, False)
 
 
 def effective_price(price, cost, features, assume, cmodels=None):

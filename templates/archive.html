@@ -43,6 +43,23 @@
                       border-bottom:1px solid var(--border); }
   .fair-feats b { color:var(--text); font-weight:600; text-align:right; }
   .fair-feats b.unk { color:var(--muted); font-weight:400; }
+  .rb { flex-basis:100%; display:flex; flex-direction:column; gap:.9rem; margin-bottom:.6rem; padding-bottom:.9rem; border-bottom:1px solid var(--border); }
+  .rb-head { display:flex; flex-direction:column; gap:.1rem; margin-bottom:.35rem; font-size:.88rem; }
+  .rb-head .big { font-size:1.2rem; }
+  .rb-bar { display:flex; height:2rem; border-radius:6px; overflow:hidden; background:var(--surface-2); }
+  .rb-seg { flex:none; display:flex; align-items:center; justify-content:center; overflow:hidden; white-space:nowrap;
+            text-overflow:clip; font-size:.72rem; font-weight:600; color:#0f172a; border-right:1px solid rgba(15,23,42,.45); }
+  .rb-seg:last-child { border-right:none; }
+  .rb-flags { position:relative; }
+  .rb-flag { position:absolute; top:0; height:calc(.45rem + var(--lane) * 1.55rem); border-left:2px solid var(--text); }
+  .rb-flag span { position:absolute; top:100%; left:-2px; white-space:nowrap; font-size:.72rem; padding:.1rem .4rem;
+                  background:var(--surface-2); border:1px solid var(--border); border-radius:0 5px 5px 5px; }
+  .rb-flag.end span { left:auto; right:0; border-radius:5px 0 5px 5px; }
+  .rb-legend { display:flex; flex-wrap:wrap; gap:.3rem 1.1rem; font-size:.78rem; color:var(--muted); }
+  .rb-legend i { display:inline-block; width:.8rem; height:.8rem; border-radius:3px; margin-right:.35rem; vertical-align:-1px; }
+  .rb-kalt { background:#22c55e; } .rb-fair { background:#2dd4bf; } .rb-nk { background:#60a5fa; }
+  .rb-heizung { background:#fb923c; } .rb-strom { background:#facc15; } .rb-internet { background:#c084fc; }
+  .rb-stellplatz { background:#94a3b8; } .rb-wasser { background:#38bdf8; } .rb-muell { background:#a3a380; }
   .wb-banner { font-size:.8rem; color:var(--muted); }
 </style>
 {% endblock %}
@@ -85,29 +102,40 @@
   <div id="price-chart" style="width:100%; height:170px;"></div>
 </div>
 {% if fair %}
-{% set wf = fair.features.get('wohnflaeche') %}
-{% macro per_m2(v) %}{% if wf and v %}<div class="muted" style="font-size:.8rem;">{{ '{:.2f}'.format(v / wf).replace('.', ',') }} €/m²</div>{% endif %}{% endmacro %}
+{% macro eur(v) %}{{ '{:,.0f}'.format(v).replace(',', '.') }}{% endmacro %}
 <div class="card fair">
+  {% if fair.bars %}
+  {% set B = fair.bars %}
+  <div class="rb">
+    {% for r in B.rows %}
+    <div class="rb-row">
+      <div class="rb-head"><span class="lbl">{{ r.label }}</span>
+        <span>{{ r.kalt_label }} <b>{{ eur(r.kalt) }} €</b>{% if r.kalt_m2 %} <span class="muted">({{ r.kalt_m2 }} €/m²)</span>{% endif %}
+          <span class="muted">+ Nebenkosten {{ eur(r.total - r.kalt) }} € =</span>
+          {{ r.total_label }} <b class="big">{{ eur(r.total) }} €</b>{% if r.total_m2 %} <span class="muted">({{ r.total_m2 }} €/m²)</span>{% endif %}</span></div>
+      <div class="rb-bar">{% for sg in r.segs %}<div class="rb-seg rb-{{ sg.key }}" style="width:{{ '%.3f'|format(sg.pct) }}%"
+          title="{{ sg.label }}{{ '*' if sg.assumed }}: {{ eur(sg.eur) }} €">{% if sg.pct >= 6 %}{{ eur(sg.eur) }} €{{ '*' if sg.assumed }}{% endif %}</div>{% endfor %}</div>
+      {% if r.flags %}<div class="rb-flags" style="height:{{ 1.55 * r.lanes + 0.45 }}rem">{% for f in r.flags %}
+        <div class="rb-flag{{ ' end' if f.pct > 50 }}" style="left:{{ '%.3f'|format(f.pct) }}%; --lane:{{ f.lane }}"><span>{{ f.label }} {{ eur(f.eur) }} €{% if f.m2 %} · {{ f.m2 }} €/m²{% endif %}</span></div>{% endfor %}
+      </div>{% endif %}
+    </div>
+    {% endfor %}
+    {% if B.fair_missing %}<div class="muted" style="font-size:.8rem;">Angemessene Warmmiete {{ eur(fair.fair_price_disp) }} € liegt unter den Nebenkosten – keine angemessene Kaltmiete ableitbar.</div>{% endif %}
+    <div class="rb-legend">
+      <span><i class="rb-kalt"></i>Kaltmiete</span>{% if B.rows|length > 1 %}<span><i class="rb-fair"></i>Angemessene Kaltmiete</span>{% endif %}
+      {% for p in B.parts %}<span><i class="rb-{{ p.key }}"></i>{{ p.label }}{{ '*' if p.assumed }} {{ eur(p.eur) }} €</span>{% endfor %}
+    </div>
+    <div class="muted" style="font-size:.72rem;">Normiert = Warmmiete inkl. Heizung, Strom, Internet, Wasser, Müll, 1 PKW-Stellplatz.
+      {% if B.any_assumed %}* nicht in der Anzeige beziffert – pauschal angenommen bzw. geschätzt.{% endif %}
+      Fähnchen: Beträge lt. Anzeige.</div>
+  </div>
+  {% else %}
   {% if fair.current %}
-  <div><div class="lbl">{{ 'Angebotspreis (Kaltmiete lt. Anzeige)' if fair.kalt and not fair.kalt_est else 'Angebotspreis' }}</div><div class="big">{{ '{:,.0f}'.format(fair.current).replace(',', '.') }} €</div>{% if fair.kalt and not fair.kalt_est %}{{ per_m2(fair.current) }}{% endif %}</div>
-  {% if fair.kalt and fair.kalt_est %}
-  <div><div class="lbl">Kaltmiete (geschätzt)</div><div class="big">{{ '{:,.0f}'.format(fair.kalt).replace(',', '.') }} €</div>{{ per_m2(fair.kalt) }}
-    <div class="muted" style="font-size:.72rem; max-width:22rem;">Anzeige nennt Warmmiete – abzüglich geschätzter Neben-/Heizkosten</div></div>
+  <div><div class="lbl">Angebotspreis</div><div class="big">{{ eur(fair.current) }} €</div></div>
   {% endif %}
-  {% if fair.eff %}
-  <div><div class="lbl">Normierte Warmmiete</div><div class="big">{{ '{:,.0f}'.format(fair.eff).replace(',', '.') }} €</div>
-    <div class="muted" style="font-size:.72rem; max-width:22rem;" title="Warmmiete inkl. Heizung, Strom, Internet, Wasser, Müll, 1 PKW-Stellplatz">
-      {% for label, v in fair.eff_parts %}{{ label }} {{ '{:,.0f}'.format(v).replace(',', '.') }} €{% if not loop.last %} + {% endif %}{% endfor %}</div></div>
+  <div><div class="lbl">{{ 'Angemessene Warmmiete' if fair.eff else 'Angemessener Preis (ML)' }}</div><div class="big">{{ eur(fair.fair_price_disp) }} €</div></div>
   {% endif %}
-  {% endif %}
-  <div><div class="lbl">{{ 'Angemessene Warmmiete' if fair.eff else 'Angemessener Preis (ML)' }}</div><div class="big">{{ '{:,.0f}'.format(fair.fair_price_disp).replace(',', '.') }} €</div></div>
   {% if fair.current %}
-  {% if fair.fair_offer %}
-  <div><div class="lbl">{{ 'Angemessene Kaltmiete' if fair.kalt and not fair.kalt_est else 'Angemessener Angebotspreis' }}</div><div class="big">{{ '{:,.0f}'.format(fair.fair_offer).replace(',', '.') }} €</div>{% if fair.kalt and not fair.kalt_est %}{{ per_m2(fair.fair_offer) }}{% endif %}</div>
-  {% endif %}
-  {% if fair.fair_kalt and fair.kalt_est %}
-  <div><div class="lbl">Angemessene Kaltmiete</div><div class="big">{{ '{:,.0f}'.format(fair.fair_kalt).replace(',', '.') }} €</div>{{ per_m2(fair.fair_kalt) }}</div>
-  {% endif %}
   <div><div class="lbl">Einordnung</div>
     {% set d = fair.delta_pct %}
     {% if not fair.plausible %}<div class="muted" style="font-size:.85rem;">Preis unplausibel (z. B. Tausch/Platzhalter) – Einordnung nicht sinnvoll</div>

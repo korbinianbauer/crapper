@@ -268,6 +268,39 @@ def _fair_offer(fair_warm, eff, price):
     return _round_display(v) if v > 0 else None
 
 
+def _rent_bars(rb, fair_warm, wf):
+    """Two stacked bars for the archive page: actual (Kaltmiete + Nebenkosten = normalised Warmmiete,
+    flags at the amounts stated in the ad) and fair (fair Kaltmiete + the same Nebenkosten = fair
+    normalised Warmmiete). Widths in % of the longer bar."""
+    nk = sum(p['eur'] for p in rb['parts'])
+    fair_kalt = fair_warm - nk if fair_warm else None
+    scale = max(rb['total'], fair_warm or 0)
+
+    def per_m2(v):
+        return '{:.2f}'.format(v / wf).replace('.', ',') if wf and v and v > 0 else None
+
+    def row(kind, label, kalt, kalt_label, total, total_label, flags=()):
+        segs = [{'key': kind, 'label': kalt_label, 'eur': kalt, 'assumed': False}] + rb['parts']
+        segs = [dict(s, pct=max(s['eur'], 0) / scale * 100) for s in segs]
+        out_flags, last = [], None
+        for f in flags:
+            pct = f['eur'] / scale * 100
+            lane = 1 if last is not None and abs(pct - last[0]) < 22 and last[1] == 0 else 0
+            out_flags.append(dict(f, pct=pct, lane=lane, m2=per_m2(f['eur'])))
+            last = (pct, lane)
+        return {'label': label, 'kalt': kalt, 'kalt_label': kalt_label, 'kalt_m2': per_m2(kalt), 'total': total,
+                'total_label': total_label, 'total_m2': per_m2(total), 'segs': segs, 'flags': out_flags,
+                'lanes': 1 + max((f['lane'] for f in out_flags), default=-1)}
+
+    rows = [row('kalt', 'Angebot', rb['kalt'], 'Kaltmiete (geschätzt)' if rb['kalt_est'] else 'Kaltmiete',
+                rb['total'], 'normierte Warmmiete', rb['flags'])]
+    if fair_kalt and fair_kalt > 0:
+        rows.append(row('fair', 'Angemessen', fair_kalt, 'Angemessene Kaltmiete', fair_warm,
+                        'angemessene normierte Warmmiete'))
+    return {'rows': rows, 'parts': rb['parts'], 'fair_missing': not (fair_kalt and fair_kalt > 0),
+            'any_assumed': rb['kalt_est'] or any(p['assumed'] for p in rb['parts'])}
+
+
 def _round_display(x):
     """Display rounding of a fair price: two digits plus one digit that is 0 or 5
     (978 -> 980, 1234 -> 1250, 245678 -> 245000)."""
@@ -525,10 +558,11 @@ def _fair_info(listing_id, prices):
     fair['delta_pct'] = round((cur_price / ref - 1) * 100) if cur_price and ref else None
     # Kaltmiete (as stated, or estimated for warm-basis ads) and the fair Kaltmiete: the fair
     # normalised Warmmiete minus everything added on top of the Kaltmiete to normalise it
-    fair['kalt'], fair['kalt_est'] = ml.kalt_rent(cur_price, fair.get('cost'), fair['features'],
-                                                  fair['metrics'].get('cost_assumptions'),
-                                                  ml.cost_models_for(fair['model_id'])) if fair['eff'] else (None, False)
+    rb = ml.rent_breakdown(cur_price, fair.get('cost'), fair['features'], fair['metrics'].get('cost_assumptions'),
+                           ml.cost_models_for(fair['model_id'])) if fair['eff'] else None
+    fair['kalt'], fair['kalt_est'] = (round(rb['kalt']), rb['kalt_est']) if rb else (None, False)
     fair['fair_kalt'] = _fair_offer(fair['fair_price_disp'], fair['eff'], fair['kalt']) if fair['kalt'] else None
+    fair['bars'] = _rent_bars(rb, fair['fair_price_disp'], fair['features'].get('wohnflaeche')) if rb else None
     m = fair['metrics']
     fair['mae'] = m['candidates'][m['chosen']]['mae']
     fair['median_ape'] = round(m['candidates'][m['chosen']]['median_ape'] * 100)
