@@ -255,6 +255,15 @@ def _price_index(items: list[dict], today: date | None = None,
     return out
 
 
+def _fair_offer(fair_warm, eff, price):
+    """Fair asking price: the fair (normalised) Warmmiete minus everything that is added on top
+    of the asking price to normalise it (Nebenkosten, Heizung, Strom, Internet, Stellplatz …)."""
+    if not fair_warm or eff is None or not price:
+        return None
+    v = fair_warm - (eff - price)
+    return _round_display(v) if v > 0 else None
+
+
 def _round_display(x):
     """Display rounding of a fair price: two digits plus one digit that is 0 or 5
     (978 -> 980, 1234 -> 1250, 245678 -> 245000)."""
@@ -288,7 +297,7 @@ def index(tracker_id):
         types = (l['tracker_types'] or '').split(',')
         fair = fair_map.get(l['id'])
         price_num = latest_num['price'] if latest_num else None
-        fair_price = fair_delta = eff_price = None
+        fair_price = fair_delta = eff_price = fair_offer = None
         if fair:
             fair_price = _round_display(fair['fair_price'])
             # rents are compared as normalised Warmmiete (incl. Heizung, Strom, Internet, … see ml.effective_price)
@@ -296,8 +305,11 @@ def index(tracker_id):
                                      ml.cost_models_for(fair.get('model_id')))
             if eff is not None and price_num and eff != price_num:
                 eff_price = round(eff)
+                fair_offer = _fair_offer(fair_price, eff, price_num)
             if price_num and ml.is_plausible(price_num, fair['features'], fair['per'], fair.get('per_range')):
-                fair_delta = round((eff / fair_price - 1) * 100)   # + = above fair
+                # rating = asking price vs. fair asking price (without cost items: vs. fair price)
+                fair_offer = fair_offer or fair_price
+                fair_delta = round((price_num / fair_offer - 1) * 100)   # + = above fair
         cards[l['id']] = {
             'id': l['id'],
             'source': l['source'],
@@ -321,6 +333,7 @@ def index(tracker_id):
             'fair_price': fair_price,
             'fair_delta': fair_delta,
             'eff_price': eff_price,
+            'fair_offer': fair_offer,
             'history': [
                 {'t': h['observed_at'], 'price': h['price'], 'label': h['price_text']}
                 for h in hist
@@ -496,7 +509,9 @@ def listing_archive(listing_id):
             fair['eff'] = None
         base = fair['eff'] or cur_price
         fair['fair_price_disp'] = _round_display(fair['fair_price'])
-        fair['delta_pct'] = round((base / fair['fair_price_disp'] - 1) * 100) if base else None
+        fair['fair_offer'] = _fair_offer(fair['fair_price_disp'], fair['eff'], cur_price) if fair['eff'] else None
+        ref = fair['fair_offer'] or fair['fair_price_disp']
+        fair['delta_pct'] = round((cur_price / ref - 1) * 100) if cur_price and ref else None
         m = fair['metrics']
         fair['mae'] = m['candidates'][m['chosen']]['mae']
         fair['median_ape'] = round(m['candidates'][m['chosen']]['median_ape'] * 100)

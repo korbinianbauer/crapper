@@ -53,7 +53,8 @@
   .actions { display:flex; gap:.4rem; }
 
   .rating { font-size:.8rem; color:var(--muted); margin:.1rem 0 .3rem; }
-  .rating b { font-weight:700; color:var(--text); } .rating b.cheap { color:var(--primary); } .rating b.dear { color:var(--danger); }
+  .rating-inline { font-size:.9rem; font-weight:600; color:var(--text); margin-left:.2rem; }
+  .rating-inline.cheap { color:var(--primary); } .rating-inline.dear { color:var(--danger); }
   #sortbar { display:none; align-items:center; gap:.4rem; margin-left:auto; font-size:.85rem; color:var(--muted); }
   #sortbar button { white-space:nowrap; }
   #sortbar select { background:var(--surface-2); color:var(--text); border:1px solid var(--border);
@@ -367,22 +368,30 @@ function esc(s) {
   return d.innerHTML;
 }
 
-// Asking price vs. ML fair price: negative = cheaper than fair.
-function ratingHtml(c) {
-  if (c.fair_price == null) return '';
-  const fair = c.fair_price.toLocaleString('de-DE') + ' €';
-  if (c.fair_delta == null)
-    return `<div class="rating" title="Preis nicht plausibel – keine Einordnung">Fairer Preis ${fair}</div>`;
+// Rating = asking price vs. fair asking price (negative = cheaper than fair).
+function ratingLabel(d) {
+  return d >= 25 ? ['sehr teuer', 'dear'] : d >= 10 ? ['teuer', 'dear']
+       : d <= -25 ? ['sehr günstig', 'cheap'] : d <= -10 ? ['günstig', 'cheap'] : ['fair', ''];
+}
+function ratingInline(c) {          // appended to the price row
+  if (c.fair_delta == null) return '';
+  const [txt, cls] = ratingLabel(c.fair_delta);
   const d = c.fair_delta;
-  const cls = d <= -10 ? 'cheap' : d >= 10 ? 'dear' : '';
-  const txt = d <= -10 ? `${-d} % unter fair` : d >= 10 ? `${d} % über fair`
-            : `fair (${d > 0 ? '+' : ''}${d} %)`;
-  // rents are rated on the normalised Warmmiete (incl. Heizung, Strom, Internet, Wasser, Müll, Stellplatz) — show it
+  return `<span class="rating-inline ${cls}">${txt} <b>${d > 0 ? '+' : ''}${d} %</b></span>`;
+}
+function ratingHtml(c) {            // detail lines below the price row
+  if (c.fair_price == null) return '';
+  const eur = v => v.toLocaleString('de-DE') + ' €';
+  if (c.fair_delta == null)
+    return `<div class="rating" title="Preis nicht plausibel – keine Einordnung">Fairer Preis ${eur(c.fair_price)}</div>`;
   if (c.eff_price) {
     const tip = 'Normierte Warmmiete inkl. Heizung, Strom, Internet, Wasser, Müllabfuhr und 1 PKW-Stellplatz (Details im Archiv)';
-    return `<div class="rating" title="${tip}"><b class="${cls}">${txt}</b> · normierte Warmmiete ${c.eff_price.toLocaleString('de-DE')} € vs. fair ${fair}</div>`;
+    return `<div class="rating" title="${tip}">
+      <div>Normierte Warmmiete ${eur(c.eff_price)}</div>
+      <div>Faire Warmmiete ${eur(c.fair_price)}</div>
+      ${c.fair_offer ? `<div>Fairer Angebotspreis ${eur(c.fair_offer)}</div>` : ''}</div>`;
   }
-  return `<div class="rating"><b class="${cls}">${txt}</b> · Fairer Preis ${fair}</div>`;
+  return `<div class="rating"><div>Fairer Preis ${eur(c.fair_price)}</div></div>`;
 }
 
 // Gallery on the cards: photos are fetched once per listing (/listing/<id>/images), then browsed in place.
@@ -439,7 +448,7 @@ function listingCardHtml(c) {
         </div>
       </div>
     </div>
-    <div class="row"><span class="price">${esc(c.current_price)}</span> ${badge}</div>
+    <div class="row"><span class="price">${esc(c.current_price)}</span> ${ratingInline(c)} ${badge}</div>
     ${ratingHtml(c)}
     <div class="chart" id="chart-${c.id}"></div>
     ${hide}

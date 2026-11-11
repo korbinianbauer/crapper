@@ -94,6 +94,9 @@
     <div class="muted" style="font-size:.72rem; max-width:22rem;" title="Warmmiete inkl. Heizung, Strom, Internet, Wasser, Müll, 1 PKW-Stellplatz">
       {% for label, v in fair.eff_parts %}{{ label }} {{ '{:,.0f}'.format(v).replace(',', '.') }} €{% if not loop.last %} + {% endif %}{% endfor %}</div></div>
   {% endif %}
+  {% if fair.fair_offer %}
+  <div><div class="lbl">Fairer Angebotspreis</div><div class="big">{{ '{:,.0f}'.format(fair.fair_offer).replace(',', '.') }} €</div></div>
+  {% endif %}
   <div><div class="lbl">Einordnung</div>
     {% set d = fair.delta_pct %}
     {% if not fair.plausible %}<div class="muted" style="font-size:.85rem;">Preis unplausibel (z. B. Tausch/Platzhalter) – Einordnung nicht sinnvoll</div>
