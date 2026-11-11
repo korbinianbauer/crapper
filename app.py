@@ -187,7 +187,6 @@ def _start_refresh(trackers: list[dict], force: bool = False) -> bool:
 
 GONE_HIDE_DAYS = 7          # vanished listings are hidden by default after this long
 MIN_INDEX_PRICE = 5.0       # ignore placeholder prices (1 €, 0 €) in the index
-MAX_DAILY_MOVE = 2.0        # clamp a single listing's daily ratio to [1/2, 2]
 
 
 def _median_price(cards: list[dict]) -> float | None:
@@ -199,73 +198,95 @@ def _median_price(cards: list[dict]) -> float | None:
     return statistics.median(prices) if prices else None
 
 
-def _price_index(items: list[dict], today: date | None = None,
-                 gap_days: set[str] | None = None) -> list[dict]:
-    """Chain-linked daily price index (Jevons / geometric mean), base 100 = 1.0.
+_IDX_CACHE: dict = {}
+MIN_INDEX_N = 3             # fewer comparable listings on a day → no index value
 
-    `items`: dicts with `history` (`{'t': iso, 'price': float|None}`), `active`
-    and `last_seen`. Per day the index moves by the geometric mean of the
-    day-over-day price ratios of the listings that had a numeric price on both
-    days, so new listings enter without causing a jump and vanished ones simply
-    drop out (a listing counts until the day it was last seen). Prices are
-    forward-filled between observations (history only stores changes).
-    Returns `[{'t': 'YYYY-MM-DD', 'index': float, 'median': float|None}]`, extended
-    up to today; `median` is the median price of the listings alive that day
-    (price level, in contrast to the movement-only index)."""
+
+def _index_series(card: dict, fair: dict | None):
+    """(start, end, [(day, price/fair)], model trained_at) of one listing for the model-based index.
+    The ratio is the *normalised* asking price (rents incl. Nebenkosten/Heizung …, `ml.effective_price`)
+    divided by the raw model prediction. Implausible prices (excluded from training) are skipped."""
+    if not fair or not fair.get('raw'):
+        return None
+    key = (card['id'], fair.get('model_id'), len(card['history']))
+    if key in _IDX_CACHE:
+        return _IDX_CACHE[key]
+    cm = ml.cost_models_for(fair.get('model_id'))
+    pts, memo = [], {}
+    for h in card['history']:
+        p = h['price']
+        if p is not None and p not in memo:
+            v = None
+            if ml.is_plausible(p, fair['features'], fair['per'], fair.get('per_range')):
+                v = ml.effective_price(p, fair.get('cost'), fair['features'], fair.get('assume'), cm) or p
+            memo[p] = v / fair['raw'] if v else None
+        pts.append((date.fromisoformat(h['t'][:10]), None if p is None else memo[p]))
+    if not any(x[1] is not None for x in pts):
+        return None
+    end = date.today() if card.get('active', True) else \
+        min(date.today(), date.fromisoformat((card.get('last_seen') or '')[:10] or date.today().isoformat()))
+    res = (pts[0][0], max(end, pts[0][0]), pts, fair.get('trained_at'))
+    _IDX_CACHE[key] = res
+    return res
+
+
+def _price_index(items: list[dict], fair_map: dict, today: date | None = None,
+                 gap_days: set[str] | None = None) -> dict:
+    """Hedonic price index from the fair-price (gradient boosting) model(s).
+
+    Per day: geometric mean of (normalised asking price / model fair price) over all listings alive that
+    day (prices forward-filled between observations; a listing counts until the day it was last seen).
+    The model is fitted on the stock at its training time, so the index is ~1.0 (= 100) there; before
+    and after it shows how the quality-adjusted price level of the stock moved. The model's own
+    prediction is the denominator, so changes in the mix of listings (bigger, newer … flats) do not
+    move the index, unlike a plain median.
+    Returns `{'points': [{'t', 'index', 'median'}], 'trained': ['YYYY-MM-DD', …]}`; `median` is the median
+    asking price of the listings alive that day (price level, shown on the right axis)."""
     today = today or date.today()
     gap_days = gap_days or set()
-    series = []                                    # (start, end, [(day, price)])
+    series = [x for x in (_index_series(it, fair_map.get(it['id'])) for it in items) if x]
+    raw = []                                       # (start, end, [(day, price)]) for the median
     for it in items:
-        pts = [(date.fromisoformat(h['t'][:10]), h['price'])
-               for h in it['history'] if h['price'] is not None]
-        if not pts:
-            continue
-        end = today if it.get('active', True) else \
-            min(today, date.fromisoformat((it.get('last_seen') or '')[:10] or today.isoformat()))
-        start = pts[0][0]
-        if end < start:
-            end = start
-        series.append((start, end, pts))
-    if not series:
-        return []
+        pts = [(date.fromisoformat(h['t'][:10]), h['price']) for h in it['history'] if h['price'] is not None]
+        if pts:
+            end = today if it.get('active', True) else \
+                min(today, date.fromisoformat((it.get('last_seen') or '')[:10] or today.isoformat()))
+            raw.append((pts[0][0], max(end, pts[0][0]), pts))
+    if not series and not raw:
+        return {'points': [], 'trained': []}
 
-    first = min(s[0] for s in series)
+    first = min(s[0] for s in series + raw)
     days = [first + timedelta(d) for d in range((today - first).days + 1)]
 
-    def price_on(pts, day, cache):
-        # pts are chronological; last observation on/before `day`
+    def at(pts, day, cache):
         i = cache[0]
         while i + 1 < len(pts) and pts[i + 1][0] <= day:
             i += 1
         cache[0] = i
-        return pts[i][1]
+        return pts[i][1] if pts[i][0] <= day else None
 
-    caches = [[0] for _ in series]
-    prev: list[float | None] = [None] * len(series)
-    level = 1.0
     def med(vals):
         v = [x for x in vals if x is not None and x >= MIN_INDEX_PRICE]
         return statistics.median(v) if v else None
 
+    sc, rc = [[0] for _ in series], [[0] for _ in raw]
     out = []
-    for k, day in enumerate(days):
-        cur: list[float | None] = []
-        for (start, end, pts), c in zip(series, caches):
-            cur.append(price_on(pts, day, c) if start <= day <= end else None)
-        if k == 0:
-            out.append({'t': day.isoformat(), 'index': level, 'median': None if day.isoformat() in gap_days else med(cur)})
-        else:
-            logs = []
-            for a, b in zip(prev, cur):
-                if a is None or b is None or a < MIN_INDEX_PRICE or b < MIN_INDEX_PRICE:
-                    continue
-                r = min(max(b / a, 1 / MAX_DAILY_MOVE), MAX_DAILY_MOVE)
-                logs.append(math.log(r))
-            if logs:
-                level *= math.exp(sum(logs) / len(logs))
-            out.append({'t': day.isoformat(), 'index': level, 'median': None if day.isoformat() in gap_days else med(cur)})
-        prev = cur
-    return out
+    for day in days:
+        logs = []
+        for (start, end, pts, _), c in zip(series, sc):
+            if start <= day <= end:
+                r = at(pts, day, c)
+                if r:
+                    logs.append(math.log(r))
+        prices = [at(pts, day, c) for (start, end, pts), c in zip(raw, rc) if start <= day <= end]
+        iso = day.isoformat()
+        out.append({'t': iso,
+                    'index': math.exp(sum(logs) / len(logs)) if len(logs) >= MIN_INDEX_N else None,
+                    'median': None if iso in gap_days else med(prices)})
+    while out and out[0]['index'] is None and out[0]['median'] is None:
+        out.pop(0)
+    trained = sorted({(x[3] or '')[:10] for x in series if x[3]})
+    return {'points': out, 'trained': trained}
 
 
 def _fair_offer(fair_warm, eff, price):
@@ -423,7 +444,7 @@ def index(tracker_id):
             'member_ids': [m['id'] for m in members],
             'price_problem': problems.get(t['id']) or next(
                 (problems[m['id']] for m in members if m['id'] in problems), None),
-            'trend': _price_index([cards[i] for i in ids],
+            'trend': _price_index([cards[i] for i in ids], fair_map,
                                   gap_days=set().union(*(gaps.get(i, set()) for i in [t['id']] + [m['id'] for m in members]))),
         })
 

@@ -108,7 +108,7 @@
     </div>
 
     <div class="chart" id="tchart-{{ t.id }}"></div>
-    <div class="hint" style="margin:0;"><span style="color:#3b82f6;">━</span> Preisindex (links) · <span style="color:#f59e0b;">━</span> Medianpreis (rechts)</div>
+    <div class="hint" style="margin:0;"><span style="color:#3b82f6;">━</span> Preisindex nach GB-Modell, 100 = Trainingszeitpunkt (links) · <span style="color:#f59e0b;">━</span> Medianpreis (rechts)</div>
     <div class="hint">Klicken für Einzelanzeigen →</div>
   </div>
 {% endmacro %}
@@ -373,31 +373,36 @@ function renderListingChart(c) {
   }), CHART_CFG);
 }
 
-// Price index (chain-linked, 100 = start; left axis) and median price of the
+// Hedonic price index from the fair-price model (100 = level at model training time, dashed line; left axis) and median price of the
 // listings alive each day (price level in €; right axis), daily up to today.
-function renderIndexChart(el, trend) {
+function renderIndexChart(el, tr) {
   if (!el) return;
-  if (!trend || trend.length === 0) {
+  const trend = (tr && tr.points) || [];
+  const trained = (tr && tr.trained) || [];
+  if (trend.length === 0) {
     el.innerHTML = '<div style="color:#94a3b8;font-size:.78rem;padding:1.4rem 0;text-align:center;">' +
                    'Kein gemeinsamer Preisverlauf</div>';
     return;
   }
   const xs = trend.map(p => new Date(p.t + 'T00:00:00'));
-  const idx = trend.map(p => p.index * 100);
+  const idx = trend.map(p => p.index == null ? null : p.index * 100);
+  const idxVals = idx.filter(v => v != null);
+  if (idxVals.length === 0) idx.fill(null);
   const med = trend.map(p => p.median);
   if (trend.length === 1) { xs.push(new Date()); idx.push(idx[0]); med.push(med[0]); }
   // Both y-axes share one scale: median axis = k × index axis, so a relative
   // change is equally tall on both lines. k maps the highest index to the
   // highest median; the visible range is the union of both series.
   const medVals = med.filter(v => v != null);
-  const k = medVals.length ? Math.max(...medVals) / Math.max(...idx) : 1;
-  const lo = Math.min(Math.min(...idx), medVals.length ? Math.min(...medVals) / k : Infinity);
-  const hi = Math.max(...idx);
+  const hiI = idxVals.length ? Math.max(...idxVals) : 100;
+  const k = medVals.length ? Math.max(...medVals) / hiI : 1;
+  const lo = Math.min(idxVals.length ? Math.min(...idxVals) : 100, medVals.length ? Math.min(...medVals) / k : Infinity);
+  const hi = hiI;
   const pad = Math.max((hi - lo) * 0.08, 1);
   const r1 = [lo - pad, hi + pad];
-  const color = idx[idx.length - 1] >= 100 ? '#22c55e' : '#3b82f6';
+  const color = (idxVals[idxVals.length - 1] || 100) >= 100 ? '#22c55e' : '#3b82f6';
   Plotly.newPlot(el, [{
-    x: xs, y: idx, type: 'scatter', mode: 'lines', name: 'Index',
+    x: xs, y: idx, type: 'scatter', mode: 'lines', name: 'Index', connectgaps: false,
     line: {color: color, width: 2, shape: 'hv'},
     hovertemplate: 'Index %{y:.1f}<br>%{x|%d.%m.%Y}<extra></extra>',
   }, {
@@ -412,7 +417,9 @@ function renderIndexChart(el, trend) {
              range: medVals.length ? [r1[0] * k, r1[1] * k] : undefined,
              ticksuffix: ' €', tickfont: {color: '#f59e0b'}, zeroline: false},
     shapes: [{type: 'line', xref: 'paper', x0: 0, x1: 1, y0: 100, y1: 100,
-              line: {color: '#475569', width: 1, dash: 'dot'}}],
+              line: {color: '#475569', width: 1, dash: 'dot'}}].concat(trained.map(d => (
+      {type: 'line', yref: 'paper', x0: d, x1: d, y0: 0, y1: 1,
+       line: {color: '#a78bfa', width: 1, dash: 'dash'}}))),
   }), CHART_CFG);
 }
 function renderTrackerChart(t) {
