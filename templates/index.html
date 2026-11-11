@@ -139,7 +139,7 @@
           <button class="btn btn-outline btn-sm" type="button" title="Nach oben" onclick="moveTracker({{ t.id }}, -1)">▲</button>
           <button class="btn btn-outline btn-sm" type="button" title="Nach unten" onclick="moveTracker({{ t.id }}, 1)">▼</button>
         </td>
-        <td style="padding:.5rem .4rem;">{% if t.type != 'group' %}<input type="checkbox" name="ids" value="{{ t.id }}" form="group-form" title="Zum Zusammenlegen auswählen">{% endif %}</td>
+        <td style="padding:.5rem .4rem;">{% if t.type != 'group' %}<input type="checkbox" name="ids" value="{{ t.id }}" form="group-form" style="width:1.1rem; height:1.1rem; padding:0; cursor:pointer;" title="Zum Zusammenlegen auswählen">{% endif %}</td>
         <td style="padding:.5rem .4rem;">{% if t.type == 'group' %}🗂{% elif t.type == 'search' %}🔍{% else %}📌{% endif %}</td>
         <td style="padding:.5rem .4rem; width:100%;{% if t.parent_id %} padding-left:1.6rem;{% endif %}">
           {% if t.type == 'group' %}<b>{{ t.label }}</b> <span class="muted">(Gruppe)</span>{% else %}<span class="badge badge-grey">{{ t.source_name }}</span> {{ t.label }}{% endif %}
