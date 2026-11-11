@@ -354,6 +354,7 @@ def index(tracker_id):
         active = sum(1 for c in tcards if c['active'])
         tracker_cards.append({
             'id': t['id'],
+            'enabled': bool(t['enabled']),
             'source_name': t['source_name'],
             'label': t['label'],
             'type': t['type'],
@@ -704,6 +705,30 @@ def add_tracker():
 def delete_tracker(tracker_id):
     db.delete_tracker(tracker_id)
     return redirect(url_for('index'))
+
+
+@app.route('/tracker/<int:tracker_id>/pause', methods=['POST'])
+@login_required
+@csrf_protect
+def pause_tracker(tracker_id):
+    """Toggle `enabled`: paused trackers are not polled and sit collapsed at the page bottom."""
+    t = db.get_tracker(tracker_id)
+    if t is None:
+        abort(404)
+    db.set_tracker_enabled(tracker_id, not t['enabled'])
+    return redirect(url_for('index'))
+
+
+@app.route('/trackers/reorder', methods=['POST'])
+@login_required
+@csrf_protect
+def reorder_trackers():
+    data = request.get_json(silent=True) or {}
+    ids = data.get('ids')
+    if not isinstance(ids, list) or not all(isinstance(i, int) for i in ids) or not ids:
+        abort(400)
+    db.reorder_trackers(ids)
+    return jsonify({'status': 'ok'})
 
 
 @app.route('/tracker/<int:tracker_id>/refresh', methods=['POST'])

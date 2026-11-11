@@ -80,6 +80,39 @@
 {% endblock %}
 
 {% block content %}
+{% macro tracker_card(t, logged_in) %}
+  <div class="tcard card {{ 'allgone' if t.listing_count and not t.active_count }}"
+       data-id="{{ t.id }}" onclick="openTracker({{ t.id }})"{% if logged_in and t.enabled %} draggable="true"{% endif %}>
+    <div class="thead">
+      <div>
+        <div class="tlabel">{% if t.type == 'search' %}🔍{% else %}📌{% endif %} {{ t.label }}</div>
+        <div class="meta tracker-tag"><span class="badge badge-grey">{{ t.source_name }}</span></div>
+      </div>
+    </div>
+
+    {% if t.price_problem %}
+    <div class="warn" title="Letzter Poll: {{ t.price_problem.polled_at }}">
+      ⚠️ Preisextraktion gestört: nur {{ t.price_problem.priced }} von {{ t.price_problem.found }} Anzeigen
+      mit Preis in der Suche{% if t.price_problem.rescued %} ({{ t.price_problem.rescued }} über die Anzeigenseite ergänzt){% endif %}.
+      Seiten werden weiter archiviert; Median für betroffene Tage ausgeblendet.
+    </div>
+    {% endif %}
+
+    <div class="tstats">
+      <span><b>{{ t.listing_count }}</b> Anzeigen</span>
+      <span><b style="color:var(--success,#22c55e);">{{ t.active_count }}</b> aktiv</span>
+      {% if t.gone_count %}<span><b style="color:var(--danger);">{{ t.gone_count }}</b> weg</span>{% endif %}
+      {% if t.median_price is not none %}<span title="Median der aktiven Anzeigen">Median <b>{{ '%.0f'|format(t.median_price) }} €</b></span>{% endif %}
+      {% if t.avg_price is not none %}<span>Ø <b>{{ '%.0f'|format(t.avg_price) }} €</b></span>{% endif %}
+      {% if t.min_price is not none %}<span><b>{{ '%.0f'|format(t.min_price) }}</b>–<b>{{ '%.0f'|format(t.max_price) }} €</b></span>{% endif %}
+    </div>
+
+    <div class="chart" id="tchart-{{ t.id }}"></div>
+    <div class="hint" style="margin:0;"><span style="color:#3b82f6;">━</span> Preisindex (links) · <span style="color:#f59e0b;">━</span> Medianpreis (rechts)</div>
+    <div class="hint">Klicken für Einzelanzeigen →</div>
+  </div>
+{% endmacro %}
+
 
 {% if session.logged_in %}
 <div class="card gap">
@@ -99,9 +132,13 @@
 <details class="card gap">
   <summary style="cursor:pointer; font-weight:600;">Tracker verwalten ({{ trackers|length }})</summary>
   <table style="width:100%; margin-top:.85rem; border-collapse:collapse; font-size:.85rem;">
-    <tbody>
+    <tbody id="manage-body">
       {% for t in trackers %}
-      <tr style="border-top:1px solid var(--border);">
+      <tr style="border-top:1px solid var(--border);{% if not t.enabled %} opacity:.6;{% endif %}" data-id="{{ t.id }}" data-enabled="{{ 1 if t.enabled else 0 }}">
+        <td style="padding:.5rem .4rem; white-space:nowrap;">
+          <button class="btn btn-outline btn-sm" type="button" title="Nach oben" onclick="moveTracker({{ t.id }}, -1)">▲</button>
+          <button class="btn btn-outline btn-sm" type="button" title="Nach unten" onclick="moveTracker({{ t.id }}, 1)">▼</button>
+        </td>
         <td style="padding:.5rem .4rem;">{% if t.type == 'search' %}🔍{% else %}📌{% endif %}</td>
         <td style="padding:.5rem .4rem; width:100%;">
           <span class="badge badge-grey">{{ t.source_name }}</span> {{ t.label }}
@@ -114,6 +151,10 @@
           <form method="post" action="{{ url_for('refresh_tracker', tracker_id=t.id) }}"
                 style="display:inline;" onsubmit="fetch(this.action,{method:'POST',headers:{'X-CSRF-Token':'{{ csrf_token() }}'}}).then(watchRefresh);this.querySelector('button').textContent='…';return false;">
             <button class="btn btn-outline btn-sm" type="submit">↻</button>
+          </form>
+          <form method="post" action="{{ url_for('pause_tracker', tracker_id=t.id) }}" style="display:inline;">
+            <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+            <button class="btn btn-outline btn-sm" type="submit" title="{{ 'Pausieren (nicht mehr abfragen, einklappen)' if t.enabled else 'Fortsetzen' }}">{{ '⏸' if t.enabled else '▶' }}</button>
           </form>
           <form method="post" action="{{ url_for('delete_tracker', tracker_id=t.id) }}"
                 style="display:inline;" onsubmit="return confirm('Delete this tracker?');">
@@ -166,40 +207,25 @@
 </div>
 {% endif %}
 
-<!-- tracker overview -->
+<!-- tracker overview (active trackers; paused ones collapsed at the bottom) -->
+<div id="overview">
 <div class="grid" id="tracker-grid">
-  {% for t in tracker_cards %}
-  <div class="tcard card {{ 'allgone' if t.listing_count and not t.active_count }}"
-       data-id="{{ t.id }}" onclick="openTracker({{ t.id }})">
-    <div class="thead">
-      <div>
-        <div class="tlabel">{% if t.type == 'search' %}🔍{% else %}📌{% endif %} {{ t.label }}</div>
-        <div class="meta tracker-tag"><span class="badge badge-grey">{{ t.source_name }}</span></div>
-      </div>
-    </div>
-
-    {% if t.price_problem %}
-    <div class="warn" title="Letzter Poll: {{ t.price_problem.polled_at }}">
-      ⚠️ Preisextraktion gestört: nur {{ t.price_problem.priced }} von {{ t.price_problem.found }} Anzeigen
-      mit Preis in der Suche{% if t.price_problem.rescued %} ({{ t.price_problem.rescued }} über die Anzeigenseite ergänzt){% endif %}.
-      Seiten werden weiter archiviert; Median für betroffene Tage ausgeblendet.
-    </div>
-    {% endif %}
-
-    <div class="tstats">
-      <span><b>{{ t.listing_count }}</b> Anzeigen</span>
-      <span><b style="color:var(--success,#22c55e);">{{ t.active_count }}</b> aktiv</span>
-      {% if t.gone_count %}<span><b style="color:var(--danger);">{{ t.gone_count }}</b> weg</span>{% endif %}
-      {% if t.median_price is not none %}<span title="Median der aktiven Anzeigen">Median <b>{{ '%.0f'|format(t.median_price) }} €</b></span>{% endif %}
-      {% if t.avg_price is not none %}<span>Ø <b>{{ '%.0f'|format(t.avg_price) }} €</b></span>{% endif %}
-      {% if t.min_price is not none %}<span><b>{{ '%.0f'|format(t.min_price) }}</b>–<b>{{ '%.0f'|format(t.max_price) }} €</b></span>{% endif %}
-    </div>
-
-    <div class="chart" id="tchart-{{ t.id }}"></div>
-    <div class="hint" style="margin:0;"><span style="color:#3b82f6;">━</span> Preisindex (links) · <span style="color:#f59e0b;">━</span> Medianpreis (rechts)</div>
-    <div class="hint">Klicken für Einzelanzeigen →</div>
-  </div>
+  {% for t in tracker_cards if t.enabled %}
+  {{ tracker_card(t, session.logged_in) }}
   {% endfor %}
+</div>
+
+{% set paused = tracker_cards|rejectattr('enabled')|list %}
+{% if paused %}
+<details class="card gap" id="paused-trackers" style="margin-top:1.5rem;">
+  <summary style="cursor:pointer; font-weight:600;">Pausierte Tracker ({{ paused|length }})</summary>
+  <div class="grid" style="margin-top:.85rem;">
+    {% for t in paused %}
+    {{ tracker_card(t, session.logged_in) }}
+    {% endfor %}
+  </div>
+</details>
+{% endif %}
 </div>
 
 <!-- per-tracker listing detail (rendered client-side on click) -->
@@ -455,7 +481,7 @@ function listingCardHtml(c) {
   </div>`;
 }
 
-const overview = document.getElementById('tracker-grid');
+const overview = document.getElementById('overview');
 const detail   = document.getElementById('detail');
 const detailGrid = document.getElementById('detail-grid');
 const detailTitle = document.getElementById('detail-title');
@@ -609,6 +635,56 @@ window.addEventListener('popstate', e => {
 });
 
 if (OPEN_TRACKER !== null) showTracker(OPEN_TRACKER);
+
+
+// ── reorder / pause ──────────────────────────────────────────────────────
+function postOrder(ids) {
+  return fetch('/trackers/reorder', {method: 'POST',
+    headers: {'Content-Type': 'application/json', 'X-CSRF-Token': {{ csrf_token()|tojson }}},
+    body: JSON.stringify({ids})});
+}
+// ▲/▼ in the manage table: swap with the neighbouring tracker of the same state
+function moveTracker(id, dir) {
+  const rows = [...document.querySelectorAll('#manage-body tr')];
+  const row = rows.find(r => +r.dataset.id === id);
+  const group = rows.filter(r => r.dataset.enabled === row.dataset.enabled);
+  const i = group.indexOf(row), j = i + dir;
+  if (j < 0 || j >= group.length) return;
+  const ids = group.map(r => +r.dataset.id);
+  [ids[i], ids[j]] = [ids[j], ids[i]];
+  postOrder(ids).then(() => location.reload());
+}
+// drag & drop of the overview cards (active trackers only)
+(function () {
+  const grid = document.getElementById('tracker-grid');
+  let drag = null;
+  grid.addEventListener('dragstart', e => {
+    drag = e.target.closest('.tcard[draggable]');
+    if (drag) { e.dataTransfer.effectAllowed = 'move'; drag.style.opacity = '.4'; }
+  });
+  grid.addEventListener('dragover', e => {
+    if (!drag) return;
+    e.preventDefault();
+    const over = e.target.closest('.tcard');
+    if (!over || over === drag) return;
+    const after = !!(drag.compareDocumentPosition(over) & Node.DOCUMENT_POSITION_FOLLOWING);
+    grid.insertBefore(drag, after ? over.nextSibling : over);
+  });
+  grid.addEventListener('dragend', () => {
+    if (!drag) return;
+    drag.style.opacity = '';
+    drag = null;
+    postOrder([...grid.querySelectorAll('.tcard')].map(c => +c.dataset.id));
+    TRACKERS.forEach(t => { const el = document.getElementById('tchart-' + t.id);
+                            if (el && el.data) Plotly.Plots.resize(el); });
+  });
+})();
+// charts inside the collapsed "paused" section have no width until it is opened
+const pausedBox = document.getElementById('paused-trackers');
+if (pausedBox) pausedBox.addEventListener('toggle', () => {
+  TRACKERS.filter(t => !t.enabled).forEach(t => { const el = document.getElementById('tchart-' + t.id);
+                                                  if (el && el.data) Plotly.Plots.resize(el); });
+});
 
 // ── modals ────────────────────────────────────────────────────────────────
 function closeModals() {

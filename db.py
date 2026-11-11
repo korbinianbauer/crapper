@@ -192,6 +192,9 @@ def init_db():
         _add_columns_if_missing(conn, 'listing_versions', {
             'assets_at': 'TEXT',                      # when this page's assets were archived
         })
+        if 'position' not in {r[1] for r in conn.execute('PRAGMA table_info(trackers)')}:
+            conn.execute('ALTER TABLE trackers ADD COLUMN position INTEGER NOT NULL DEFAULT 0')
+            conn.execute('UPDATE trackers SET position = id')   # keep the existing order
         # Seed v1 for listings that predate versioning.
         conn.execute('''
             INSERT INTO listing_versions (listing_id, version, fetched_at, title, location,
@@ -276,7 +279,8 @@ def get_all_settings() -> dict[str, str]:
 def add_tracker(source: str, type_: str, label: str, url: str) -> int:
     with get_db() as conn:
         cur = conn.execute(
-            'INSERT INTO trackers (source, type, label, url) VALUES (?, ?, ?, ?)',
+            'INSERT INTO trackers (source, type, label, url, position) '
+            'VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(position), 0) + 1 FROM trackers))',
             (source, type_, label, url),
         )
         return cur.lastrowid
@@ -335,8 +339,33 @@ def get_trackers(enabled_only: bool = False) -> list[dict]:
     clause = 'WHERE enabled = 1' if enabled_only else ''
     with get_db() as conn:
         return [_row_to_tracker(r) for r in conn.execute(
-            f'SELECT * FROM trackers {clause} ORDER BY id'
+            f'SELECT * FROM trackers {clause} ORDER BY position, id'
         )]
+
+
+def set_tracker_enabled(tracker_id: int, enabled: bool):
+    """Pause (enabled=False) / resume a tracker. Paused trackers are not polled and
+    are shown collapsed at the bottom of the frontpage; all data is kept."""
+    with get_db() as conn:
+        conn.execute('UPDATE trackers SET enabled = ? WHERE id = ?',
+                     (1 if enabled else 0, tracker_id))
+
+
+def reorder_trackers(ids: list[int]):
+    """Put `ids` into the given order. They are redistributed over the positions they
+    occupied before, so trackers not in `ids` (e.g. the paused group) keep their place."""
+    with get_db() as conn:
+        marks = ','.join('?' * len(ids))
+        rows = conn.execute(
+            f'SELECT id, position FROM trackers WHERE id IN ({marks})', ids).fetchall()
+        known = {r['id'] for r in rows}
+        ids = [i for i in ids if i in known]
+        slots = sorted(r['position'] for r in rows)
+        # equal positions would make the order ambiguous → fall back to a dense range
+        if len(set(slots)) != len(slots):
+            slots = list(range(slots[0], slots[0] + len(slots)))
+        for tid, pos in zip(ids, slots):
+            conn.execute('UPDATE trackers SET position = ? WHERE id = ?', (pos, tid))
 
 
 def delete_tracker(tracker_id: int):
