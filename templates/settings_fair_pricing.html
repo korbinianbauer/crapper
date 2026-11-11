@@ -123,6 +123,7 @@
           merkt sich Annahmen und Teilmodelle – Änderungen wirken daher ab dem <b>nächsten Training</b>.
           {% if fs.cost_models %}<br>Teilmodelle des aktiven Modells:
           Heizenergie {% if fs.cost_models.kwh %}{{ fs.cost_models.kwh.n }} Anzeigen mit kWh-Angabe, Ø-Fehler {{ fs.cost_models.kwh.mae|round|int }} kWh/m²{% else %}zu wenige Daten (Energieklasse-Richtwerte){% endif %};
+          Heizenergie ohne Energieklasse {% if fs.cost_models.kwh_baujahr %}{{ fs.cost_models.kwh_baujahr.n }} Anzeigen (alle Wohnungs-Sets), Ø-Fehler {{ fs.cost_models.kwh_baujahr.mae|round|int }} kWh/m²{% else %}zu wenige Daten{% endif %};
           Betriebskosten {% if fs.cost_models.nk %}{{ fs.cost_models.nk.n }} Anzeigen, Ø-Fehler {{ fs.cost_models.nk.mae|round|int }} €/Monat{% else %}zu wenige Daten{% endif %}.{% endif %}</div>
       </section>
       {% endif %}

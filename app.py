@@ -575,7 +575,50 @@ def _fair_info(listing_id, prices):
         return int(v) if isinstance(v, float) and v.is_integer() else v
     fair['facts'] = [(f['label'], show(f, fair['features'].get(f['key'])))
                      for f in fair['definition']['features']]
+    cost = fair.get('cost')
+    if cost is not None:          # extracted cost data that the model also predicts
+        heat = cost.get('heat') or {}
+        fair['facts'] += [('Energieträger', CARRIER_LABELS.get(heat.get('carrier'), 'unbekannt')),
+                          ('Energiebedarf (kWh/m²·a)', _num(heat.get('kwh')) if heat.get('kwh') else 'unbekannt')]
+    fair['predicted'] = _predicted_facts(listing_id, fair)
     return fair
+
+
+CARRIER_LABELS = {'gas': 'Gas', 'oel': 'Heizöl', 'fernwaerme': 'Fernwärme', 'strom': 'Strom (Direktheizung)',
+                  'waermepumpe': 'Wärmepumpe', 'pellets': 'Holzpellets', 'holz': 'Scheitholz'}
+HEAT_SRC_LABELS = {'ml': 'GB-Modell (mit Energieklasse)', 'ml_baujahr': 'GB-Modell (Baujahr/Sanierung/Energieträger)',
+                   'energieklasse': 'Richtwert der Energieklasse', 'pauschal': 'pauschal (keine Daten)'}
+
+
+def _num(v, dec=0):
+    s = f'{v:,.{dec}f}'.replace(',', ' ').replace('.', ',').replace(' ', '.')
+    return s
+
+
+def _predicted_facts(listing_id, fair):
+    """Stored results of the active model (listing_predictions) as [(label, value, note)]."""
+    p = next((x for x in db.get_listing_predictions(listing_id) if x['feature_set_id'] == fair['fs_id']), None)
+    if not p:
+        return None
+    d, rent = p['data'], fair.get('cost') is not None
+    out = [('Angemessene normierte Warmmiete' if rent else 'Angemessener Preis', _num(d['fair_price']) + ' €',
+            'Modellwert ohne Offset' if fair.get('offset') else '')]
+    if 'heat_kwh_m2' in d:
+        used = d.get('heat_used') != 'anzeige'
+        out.append(('Energiebedarf (kWh/m²·a)', _num(d['heat_kwh_m2']),
+                    HEAT_SRC_LABELS.get(d['heat_kwh_src'], d['heat_kwh_src'])
+                    + (' · verwendet' if used else ' · nicht verwendet, Anzeigewert vorhanden')))
+        c = fair['cost']
+        nk_used = c.get('basis') != 'kalt' or c.get('add') is None
+        heat_used = nk_used or 'heizung' in (c.get('extra') or [])
+        out.append(('Heizkosten (€/Monat)', _num(d['heat_eur']) + ' €',
+                    f"{'Anzeigewert' if not used else 'Prognose'} × {_num(d['heat_eur_kwh'], 3)} €/kWh "
+                    f"({CARRIER_LABELS.get(d.get('heat_carrier'), 'Energieträger unbekannt')})"
+                    + ('' if heat_used else ' · nicht verwendet, in Nebenkosten lt. Anzeige enthalten')))
+        out.append(('Betriebskosten ohne Heizung (€/Monat)', _num(d['nk_eur']) + ' €',
+                    ('GB-Modell' if d['nk_src'] == 'ml' else 'pauschal 2 €/m²')
+                    + (' · verwendet' if nk_used else ' · nicht verwendet, Nebenkosten lt. Anzeige')))
+    return {'rows': out, 'model_id': p['model_id'], 'predicted_at': p['predicted_at']}
 
 
 @app.route('/listing/<int:listing_id>/archive')
@@ -954,6 +997,7 @@ def settings_select_model(fs_id):
         ml.predict(fs['name'], model_id=model_id)
     except SystemExit as e:
         flash(str(e), 'error')
+    ml.refresh_predictions(fs_id)       # stored results now come from the newly chosen model
     flash(f'Modell {model_id} wird jetzt für den angemessenen Preis verwendet.', 'ok')
     return redirect(url_for('settings_fair_pricing'))
 
@@ -968,6 +1012,7 @@ def settings_delete_model(fs_id):
         abort(400)
     if not db.get_feature_set_by_id(fs_id) or not db.delete_model(fs_id, model_id):
         abort(404)
+    ml.refresh_predictions(fs_id)       # the active model may have changed
     flash(f'Modell {model_id} gelöscht.', 'ok')
     return redirect(url_for('settings_fair_pricing'))
 

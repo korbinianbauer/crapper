@@ -14,6 +14,7 @@ as soon as their features have been extracted and imported (no retraining).
     python ml.py predict wohnung_miete_v1    # score listings that have features but no prediction
 """
 import io
+import json
 import math
 import sys
 
@@ -48,7 +49,8 @@ COST_LABELS = {'strom': 'Strom', 'internet': 'Internet', 'stellplatz': 'PKW-Stel
 CLASS_KWH = {0: 15, 1: 40, 2: 65, 3: 90, 4: 115, 5: 145, 6: 180, 7: 225, 8: 270}   # Energieklasse -> kWh/(m²a)
 HEAT_FEATURES = [{'key': 'energieklasse', 'type': 'num'}, {'key': 'baujahr', 'type': 'num'},
                  {'key': 'neubau', 'type': 'bool'}, {'key': 'saniert', 'type': 'bool'},
-                 {'key': 'carrier', 'type': 'cat'}]
+                 {'key': 'renoviert', 'type': 'bool'}, {'key': 'carrier', 'type': 'cat'}]
+HEAT_FEATURES_NO_EK = [f for f in HEAT_FEATURES if f['key'] != 'energieklasse']   # ads without Energieklasse
 NK_FEATURES = [{'key': 'wohnflaeche', 'type': 'num'}, {'key': 'zimmer', 'type': 'num'}, {'key': 'baujahr', 'type': 'num'},
                {'key': 'etage', 'type': 'num'}, {'key': 'typ', 'type': 'cat'}, {'key': 'aufzug', 'type': 'bool'},
                {'key': 'garten', 'type': 'bool'}, {'key': 'balkon', 'type': 'bool'}, {'key': 'neubau', 'type': 'bool'},
@@ -97,16 +99,30 @@ def _predict_small(cm, row):
     return float(np.exp(cm['model'].predict(cm['enc'].transform([row]))[0]))
 
 
-def heat_kwh_m2(cost, features, cmodels):
-    """kWh/(m²·a): stated in the ad, else ML estimate, else the nominal value of the Energieklasse, else None."""
+def heat_estimate(cost, features, cmodels):
+    """(kWh/(m²·a), source): stated in the ad ('anzeige'), else GB estimate — with Energieklasse if the
+    ad has one ('ml'), else from Baujahr/Sanierung/Energieträger ('ml_baujahr') —, else the nominal
+    value of the Energieklasse ('energieklasse'), else (None, None)."""
     h = (cost or {}).get('heat') or {}
     if h.get('kwh'):
-        return float(h['kwh'])
-    est = _predict_small((cmodels or {}).get('kwh'), _cost_row(features, cost))
-    if est:
-        return est
+        return float(h['kwh']), 'anzeige'
+    cm, row = cmodels or {}, _cost_row(features, cost)
     ek = (features or {}).get('energieklasse')
-    return float(CLASS_KWH[int(ek)]) if ek is not None else None
+    if ek is not None and cm.get('kwh'):
+        return _predict_small(cm['kwh'], row), 'ml'
+    if ek is None and (cm.get('kwh_baujahr') or cm.get('kwh')):
+        return _predict_small(cm.get('kwh_baujahr') or cm['kwh'], row), 'ml_baujahr' if cm.get('kwh_baujahr') else 'ml'
+    return (float(CLASS_KWH[int(ek)]), 'energieklasse') if ek is not None else (None, None)
+
+
+def heat_kwh_m2(cost, features, cmodels):
+    return heat_estimate(cost, features, cmodels)[0]
+
+
+def nk_estimate(cost, features, cmodels):
+    """(Betriebskosten ohne Heizung €/Monat, source 'ml'|'pauschal') — GB sub-model, else 2 €/m²."""
+    nk = _predict_small((cmodels or {}).get('nk'), _cost_row(features, cost))
+    return (nk, 'ml') if nk else (2.0 * ((features or {}).get('wohnflaeche') or 0), 'pauschal')
 
 
 def heating_eur(cost, features, a, cmodels):
@@ -116,12 +132,22 @@ def heating_eur(cost, features, a, cmodels):
     return kwh * wf * kwh_price(carrier, a) / 12
 
 
-def fit_cost_models(rows, a):
-    """ML sub-models for the normalisation: heating energy (kWh/m²a) and Betriebskosten ohne Heizung."""
-    heat_rows = [(_cost_row(r['features'], r['cost']), r['cost']['heat']['kwh']) for r in rows
-                 if r.get('cost') and (r['cost'].get('heat') or {}).get('kwh')]
-    kwh = _fit_small([x for x, _ in heat_rows], [y for _, y in heat_rows], HEAT_FEATURES, MIN_HEAT)
-    cm = {'kwh': kwh}
+def fit_cost_models(rows, a, heat_rows=None):
+    """ML sub-models for the normalisation: heating energy (kWh/m²a) and Betriebskosten ohne Heizung.
+    The heating models learn from `heat_rows` (all flats of all feature sets, rent and sale – the building
+    is what matters; default: `rows`): `kwh` from ads stating kWh/m², `kwh_baujahr` (no Energieklasse,
+    for ads without one) additionally from ads with only an Energieklasse (target = its nominal kWh)."""
+    stated, nominal = [], []
+    for r in (heat_rows if heat_rows is not None else rows):
+        x, kwh = _cost_row(r['features'], r.get('cost')), ((r.get('cost') or {}).get('heat') or {}).get('kwh')
+        ek = r['features'].get('energieklasse')
+        if kwh:
+            stated.append((x, kwh))
+        elif ek is not None:
+            nominal.append((x, CLASS_KWH[int(ek)]))
+    cm = {'kwh': _fit_small([x for x, _ in stated], [y for _, y in stated], HEAT_FEATURES, MIN_HEAT),
+          'kwh_baujahr': _fit_small([x for x, _ in stated + nominal], [y for _, y in stated + nominal],
+                                    HEAT_FEATURES_NO_EK, MIN_HEAT)}
     nk_rows, nk_y = [], []
     for r in rows:
         c = r.get('cost')
@@ -154,7 +180,8 @@ def effective_breakdown(price, cost, features, assume, cmodels=None):
             else:
                 nk = _predict_small((cmodels or {}).get('nk'), _cost_row(features, cost))
                 parts.append(('Betriebskosten (geschätzt)', round(nk if nk else 2.0 * wf)))
-                parts.append(('Heizung (geschätzt)', round(heat())))
+                if 'heizung' not in extra:            # else added below as 'Heizung (zzgl.)'
+                    parts.append(('Heizung (geschätzt)', round(heat())))
         elif add:
             parts.append(('Nebenkosten/Heizung lt. Anzeige', add))
     for k in ('strom', 'internet', 'stellplatz'):
@@ -209,10 +236,11 @@ def rent_breakdown(price, cost, features, assume, cmodels=None):
             if warm:                          # Wasser/Müll billed separately are not in this price
                 nk -= sum(a[k] for k in ('wasser', 'muell') if k in extra)
             inner.append(part('nk', 'Betriebskosten', round(nk)))
-            if not (warm and 'heizung' in extra):
+            if 'heizung' not in extra:
                 inner.append(part('heizung', 'Heizung', round(heat())))
     elif add:
-        inner.append(part('nk', 'Nebenkosten/Heizung', add, False))
+        inner.append(part('nk', 'Nebenkosten ohne Heizung' if 'heizung' in extra else 'Nebenkosten inkl. Heizung',
+                          add, False))
     if warm:
         if 'strom' in incl:
             inner.append(part('strom', 'Strom', round(strom)))
@@ -226,6 +254,11 @@ def rent_breakdown(price, cost, features, assume, cmodels=None):
         if add:
             flags.append({'label': 'Warmmiete lt. Anzeige', 'eur': price + add})
     outer = []                                # added on top to normalise
+    if 'heizung' in extra:
+        outer.append(part('heizung', 'Heizung', round(heat())))
+    for k in ('wasser', 'muell'):
+        if k in extra:
+            outer.append(part(k, COST_LABELS[k], a[k]))
     for k in ('strom', 'internet', 'stellplatz'):
         if k in incl:
             continue
@@ -233,11 +266,6 @@ def rent_breakdown(price, cost, features, assume, cmodels=None):
             outer.append(part(k, COST_LABELS[k], round(cost['sp']), False))
         else:
             outer.append(part(k, COST_LABELS[k], round(strom if k == 'strom' else a[k])))
-    if 'heizung' in extra:
-        outer.append(part('heizung', 'Heizung', round(heat())))
-    for k in ('wasser', 'muell'):
-        if k in extra:
-            outer.append(part(k, COST_LABELS[k], a[k]))
     if kalt <= 0:
         return None
     parts = inner + outer
@@ -351,7 +379,7 @@ def train(feature_set_name: str, per: str | None = None, activate: bool = True) 
     rows = db.get_training_rows(fs['id'])
     # rows with cost data are trained on the normalised rent (see effective_price)
     assume = db.get_cost_assumptions(fs['id']) if any(r.get('cost') for r in rows) else None
-    cmodels = fit_cost_models(rows, assume) if assume else None
+    cmodels = fit_cost_models(rows, assume, db.get_heat_rows()) if assume else None
     for r in rows:
         r['raw_price'] = r['price']
         r['price'] = (effective_price(r['price'], r.get('cost'), r['features'], assume, cmodels)
@@ -399,6 +427,7 @@ def train(feature_set_name: str, per: str | None = None, activate: bool = True) 
     joblib.dump({'encoder': enc, 'model': model, 'algo': best, 'cost_models': cmodels}, buf)
     mid = db.save_model(fs['id'], best, len(train_rows), metrics, buf.getvalue(), preds, activate)
     metrics['model_id'] = mid
+    refresh_predictions(fs['id'])            # results of the (possibly new) active model
     print(f'model {mid}: {best}  n={len(train_rows)} (excluded {len(rows) - len(train_rows)})')
     for n, s in scores.items():
         print(f'  {n:18} MAE {s["mae"]:7.1f} €  median |err| {s["median_ape"]*100:4.1f} %  R² {s["r2"]:.3f}'
@@ -453,7 +482,51 @@ def predict(feature_set_name: str, listing_ids=None, model_id: int | None = None
     X = art['encoder'].transform([r['features'] for r in todo])
     pred = np.exp(art['model'].predict(X))
     db.save_predictions(model_row['id'], {r['listing_id']: float(p) for r, p in zip(todo, pred)})
+    if model_row['id'] == db.active_model_id(fs['id']):
+        refresh_predictions(fs['id'], [r['listing_id'] for r in todo])
     return len(todo)
+
+
+def listing_results(fair_raw, cost, features, assume, cmodels):
+    """Everything the active model (incl. its cost sub-models) predicts for one listing — stored in
+    `listing_predictions` and shown on the archive page."""
+    out = {'fair_price': round(fair_raw, 2)}
+    if cost is None or not assume:
+        return out
+    a = {**DEFAULT_COSTS, **assume}
+    if 'strom' in assume and 'strom_kwh' not in assume:      # legacy model without energy prices
+        return out
+    # Energiebedarf: always the model's own estimate (also when the ad states one). Pricing/rating use
+    # the extracted value from the ad if available, this prediction only as fallback (heat_estimate).
+    heat = cost.get('heat') or {}
+    kwh, src = heat_estimate({**cost, 'heat': {**heat, 'kwh': None}}, features, cmodels)
+    out.update({'heat_kwh_m2': round(kwh, 1) if kwh else 130.0, 'heat_kwh_src': src or 'pauschal',
+                'heat_used': 'anzeige' if heat.get('kwh') else 'prognose',
+                'heat_carrier': heat.get('carrier'), 'heat_eur_kwh': round(kwh_price(heat.get('carrier'), a), 4),
+                'heat_eur': round(heating_eur(cost, features, a, cmodels), 2)})   # with the value actually used
+    nk, nsrc = nk_estimate(cost, features, cmodels)
+    out.update({'nk_eur': round(nk, 2), 'nk_src': nsrc})
+    return out
+
+
+def refresh_predictions(feature_set_id: int, listing_ids=None) -> int:
+    """(Re)write `listing_predictions` of a feature set from its ACTIVE model — all listings (the
+    active model changed: old results are overwritten/dropped) or just `listing_ids`."""
+    mid = db.active_model_id(feature_set_id)
+    if not mid:
+        db.save_listing_predictions(feature_set_id, None, {}, replace_all=True)
+        return 0
+    with db.get_db() as conn:
+        fair = {r[0]: r[1] for r in conn.execute(
+            'SELECT listing_id, fair_price FROM fair_prices WHERE model_id = ?', (mid,))}
+        metrics = json.loads(conn.execute('SELECT metrics FROM ml_models WHERE id = ?', (mid,)).fetchone()[0])
+    assume, cm = metrics.get('cost_assumptions'), cost_models_for(mid)
+    wanted = None if listing_ids is None else set(listing_ids)
+    rows = {r['listing_id']: listing_results(fair[r['listing_id']], r.get('cost'), r['features'], assume, cm)
+            for r in db.get_training_rows(feature_set_id)
+            if r['listing_id'] in fair and (wanted is None or r['listing_id'] in wanted)}
+    db.save_listing_predictions(feature_set_id, mid, rows, replace_all=wanted is None)
+    return len(rows)
 
 
 def _importances(model, algo, X, y, names):
@@ -472,5 +545,10 @@ if __name__ == '__main__':
     elif len(sys.argv) == 3 and sys.argv[1] == 'predict':
         db.init_db()
         print(_ml.predict(sys.argv[2]), 'predictions written')
+    elif len(sys.argv) in (2, 3) and sys.argv[1] == 'refresh':     # rewrite listing_predictions
+        db.init_db()
+        for fs in db.get_feature_sets_overview():
+            if len(sys.argv) == 2 or fs['name'] == sys.argv[2]:
+                print(fs['name'], _ml.refresh_predictions(fs['id']), 'listings')
     else:
         print(__doc__)

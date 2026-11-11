@@ -175,6 +175,17 @@ def init_db():
                 PRIMARY KEY (listing_id, model_id)
             );
 
+            -- results of each feature set's ACTIVE model per listing (fair price, heating energy,
+            -- heating/operating costs …) as JSON; rewritten whenever the active model changes
+            CREATE TABLE IF NOT EXISTS listing_predictions (
+                listing_id     INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+                feature_set_id INTEGER NOT NULL REFERENCES feature_sets(id) ON DELETE CASCADE,
+                model_id       INTEGER NOT NULL REFERENCES ml_models(id) ON DELETE CASCADE,
+                data           TEXT NOT NULL,
+                predicted_at   TEXT NOT NULL,
+                PRIMARY KEY (listing_id, feature_set_id)
+            );
+
             CREATE TABLE IF NOT EXISTS settings (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL DEFAULT ''
@@ -573,6 +584,23 @@ def get_training_rows(feature_set_id: int) -> list[dict]:
     return out
 
 
+def get_heat_rows() -> list[dict]:
+    """[{listing_id, features, cost}] of every listing in a feature set that has an `energieklasse`
+    feature (flats, rent and sale) — training data of the heating-energy sub-models (ml.fit_cost_models)."""
+    import json
+    with get_db() as conn:
+        sets = [r['id'] for r in conn.execute('SELECT id, definition FROM feature_sets')
+                if any(f['key'] == 'energieklasse' for f in json.loads(r['definition'])['features'])]
+        rows = conn.execute(f'''SELECT listing_id, data FROM listing_features
+                               WHERE feature_set_id IN ({",".join("?" * len(sets))})''', sets).fetchall() if sets else []
+    out = {}
+    for r in rows:
+        data = json.loads(r['data'])
+        out.setdefault(r['listing_id'], {'listing_id': r['listing_id'], 'cost': data.get('_cost'),
+                                         'features': {k: v for k, v in data.items() if not k.startswith('_')}})
+    return list(out.values())
+
+
 def get_cost_assumptions(feature_set_id: int) -> dict:
     """Monthly € assumptions used to normalise rents (see ml.effective_price)."""
     import ml
@@ -728,6 +756,35 @@ def save_predictions(model_id: int, predictions: dict[int, float]) -> None:
         conn.executemany('''INSERT OR REPLACE INTO fair_prices
                             (listing_id, model_id, fair_price, oof, predicted_at) VALUES (?, ?, ?, 1, ?)''',
                          [(lid, model_id, p, now) for lid, p in predictions.items()])
+
+
+def save_listing_predictions(feature_set_id: int, model_id: int | None, rows: dict[int, dict],
+                             replace_all: bool = False) -> None:
+    """Store the active model's results {listing_id: {...}}; `replace_all` first drops every stored
+    result of the feature set (active model changed / none left)."""
+    now = _now()
+    with get_db() as conn:
+        if replace_all:
+            conn.execute('DELETE FROM listing_predictions WHERE feature_set_id = ?', (feature_set_id,))
+        if model_id:
+            conn.executemany('''INSERT OR REPLACE INTO listing_predictions
+                                (listing_id, feature_set_id, model_id, data, predicted_at) VALUES (?, ?, ?, ?, ?)''',
+                             [(lid, feature_set_id, model_id, json.dumps(d, ensure_ascii=False), now)
+                              for lid, d in rows.items()])
+
+
+def get_listing_predictions(listing_id: int) -> list[dict]:
+    """Stored model results of a listing: [{feature_set_id, model_id, data, predicted_at, trained_at}]."""
+    with get_db() as conn:
+        rows = conn.execute('''SELECT lp.feature_set_id, lp.model_id, lp.data, lp.predicted_at, m.trained_at
+                               FROM listing_predictions lp JOIN ml_models m ON m.id = lp.model_id
+                               WHERE lp.listing_id = ?''', (listing_id,)).fetchall()
+    return [dict(r, data=json.loads(r['data'])) for r in rows]
+
+
+def active_model_id(feature_set_id: int) -> int | None:
+    with get_db() as conn:
+        return _active_model_id(conn, feature_set_id)
 
 
 def get_fair_price_map() -> dict[int, dict]:

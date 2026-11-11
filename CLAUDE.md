@@ -158,12 +158,18 @@ price and the ML rating (`fair_delta` = asking price vs. fair price in %, negati
   contained in the price, extra: [heizung|wasser|muell] NOT contained, sp: separate parking price,
   heat: {carrier: gas|oel|fernwaerme|strom|waermepumpe|pellets|holz|null, kwh: Endenergie kWh/(m²·a) from the ad|null}}`. Listings are always
   compared as **Warmmiete incl. Heizung, Strom, Internet, Wasser, Müll, 1 PKW-Stellplatz**: `ml.effective_price` adds the
-  missing items. Heating = kWh/m² (from the ad, else an ML sub-model on Energieklasse/Baujahr/Energieträger) × m² × energy price;
+  missing items. Heating = kWh/m² (from the ad, else a GB sub-model estimates the energy demand: `kwh` with Energieklasse, `kwh_baujahr` without it — Baujahr/saniert/renoviert/neubau/Energieträger; both trained on the flats of **all** feature sets with an `energieklasse` feature, rent and sale (`db.get_heat_rows`), `kwh_baujahr` also on Energieklasse-only ads with the class's nominal kWh as target) × m² × energy price of the carrier;
   unknown Nebenkosten = ML-estimated Betriebskosten (sub-model) + Heizung; Strom = Verbrauch × Preis. Energy prices are entered
   per billing unit (€/kWh, €/Liter, €/kg, €/Raummeter) on the settings page (`fair_cost_<fs_id>`, defaults in `ml.DEFAULT_COSTS`).
   The two sub-models are trained with each price model (`ml.fit_cost_models`) and stored in its artifact (`cost_models`). The model is
   trained on that normalised price, stores the assumptions in its metrics, and ratings (`fair_delta`, archive) use the same
   assumptions — so changed assumptions only apply from the next training. Sale feature sets have no `_cost`.
+- **`listing_predictions`** — persisted results of each feature set's **active** model per listing (PK listing+feature set,
+  JSON: `fair_price` raw, `heat_kwh_m2` + `heat_kwh_src` (GB estimate — always the model's own value, even if the ad states one),
+  `heat_used` (anzeige|prognose), `heat_eur`, `heat_eur_kwh`, `nk_eur`/`nk_src`). Written by `ml.refresh_predictions(fs_id[, ids])`:
+  after `ml.train`, after `ml.predict` (new listings), on choosing/deleting the active model (settings); CLI `python ml.py refresh [set]`.
+  Pricing/rating use extracted values (`_cost`) where available, these predictions as fallback. Shown on the archive page next to
+  the extracted features.
 - **Fair-price settings** (`/settings/fair-pricing`, keys in `settings`): `fair_model_<feature_set_id>` =
   active model (default: newest), `fair_offset_<feature_set_id>` = manual offset in % (-10 → shown fair
   price is 10 % below the ML prediction, to bridge asking prices vs. real deals). The offset is applied
