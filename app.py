@@ -394,7 +394,13 @@ def index(tracker_id):
         t['listing_count'] = counts.get(t['id'], 0)
         t['source_name'] = source_names.get(t['source'], t['source'])
 
-        ids = [lid for lid in memberships.get(t['id'], []) if lid in cards]
+        members = [m for m in trackers if m.get('parent_id') == t['id']] if t['type'] == 'group' else []
+        if members:
+            t['source_name'] = ' + '.join(dict.fromkeys(
+                source_names.get(m['source'], m['source']) for m in members))
+            t['listing_count'] = len({i for m in members for i in memberships.get(m['id'], [])})
+        ids = list(dict.fromkeys(lid for tid in ([t['id']] + [m['id'] for m in members])
+                                 for lid in memberships.get(tid, []) if lid in cards))
         tcards = [cards[i] for i in ids]
         prices = [c['current_price_num'] for c in tcards if c['current_price_num'] is not None]
         active = sum(1 for c in tcards if c['active'])
@@ -413,8 +419,12 @@ def index(tracker_id):
             'min_price': min(prices) if prices else None,
             'max_price': max(prices) if prices else None,
             'median_price': _median_price(tcards),
-            'price_problem': problems.get(t['id']),
-            'trend': _price_index([cards[i] for i in ids], gap_days=gaps.get(t['id'])),
+            'parent_id': t.get('parent_id'),
+            'member_ids': [m['id'] for m in members],
+            'price_problem': problems.get(t['id']) or next(
+                (problems[m['id']] for m in members if m['id'] in problems), None),
+            'trend': _price_index([cards[i] for i in ids],
+                                  gap_days=set().union(*(gaps.get(i, set()) for i in [t['id']] + [m['id'] for m in members]))),
         })
 
     hidden = [{
@@ -877,6 +887,26 @@ def pause_tracker(tracker_id):
     return redirect(url_for('index'))
 
 
+@app.route('/groups/create', methods=['POST'])
+@login_required
+@csrf_protect
+def create_group():
+    ids = [int(i) for i in request.form.getlist('ids') if i.isdigit()]
+    gid = db.create_group(request.form.get('label', ''), ids)
+    if gid is None:
+        flash('Zum Zusammenlegen mindestens zwei Tracker auswählen.', 'error')
+        return redirect(url_for('index'))
+    return redirect(url_for('index', tracker_id=gid))
+
+
+@app.route('/tracker/<int:tracker_id>/ungroup', methods=['POST'])
+@login_required
+@csrf_protect
+def ungroup_tracker(tracker_id):
+    db.set_tracker_group(tracker_id, None)
+    return redirect(url_for('index'))
+
+
 @app.route('/trackers/reorder', methods=['POST'])
 @login_required
 @csrf_protect
@@ -896,7 +926,9 @@ def refresh_tracker(tracker_id):
     tracker = db.get_tracker(tracker_id)
     if not tracker:
         return jsonify({'status': 'not found'}), 404
-    if not _start_refresh([tracker]):
+    todo = [t for t in db.get_trackers(enabled_only=True) if t.get('parent_id') == tracker_id] \
+        if tracker['type'] == 'group' else [tracker]
+    if not _start_refresh(todo):
         return jsonify({'status': 'busy', 'running': list(_active_refreshes)}), 409
     return jsonify({'status': 'started'}), 202
 
@@ -954,7 +986,7 @@ def settings_fair_pricing():
             m['mae'], m['median_ape'], m['r2'] = round(c['mae']), round(c['median_ape'] * 100, 1), c['r2']
     counts = db.get_tracker_listing_counts()
     with_fs = {fs['tracker_id'] for fs in sets}
-    without = [dict(t, listing_count=counts.get(t['id'], 0)) for t in db.get_trackers()
+    without = [dict(t, listing_count=counts.get(t['id'], 0)) for t in db.get_trackers(groups=False)
                if t['id'] not in with_fs]
     return render_template('settings_fair_pricing.html', sets=sets, without=without, cost_fields=COST_FIELDS,
                            pages=SETTINGS_PAGES, page='fair_pricing')

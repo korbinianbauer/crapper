@@ -85,7 +85,7 @@
        data-id="{{ t.id }}" onclick="openTracker({{ t.id }})"{% if logged_in and t.enabled %} draggable="true"{% endif %}>
     <div class="thead">
       <div>
-        <div class="tlabel">{% if t.type == 'search' %}🔍{% else %}📌{% endif %} {{ t.label }}</div>
+        <div class="tlabel">{% if t.type == 'group' %}🗂{% elif t.type == 'search' %}🔍{% else %}📌{% endif %} {{ t.label }}</div>
         <div class="meta tracker-tag"><span class="badge badge-grey">{{ t.source_name }}</span></div>
       </div>
     </div>
@@ -139,9 +139,10 @@
           <button class="btn btn-outline btn-sm" type="button" title="Nach oben" onclick="moveTracker({{ t.id }}, -1)">▲</button>
           <button class="btn btn-outline btn-sm" type="button" title="Nach unten" onclick="moveTracker({{ t.id }}, 1)">▼</button>
         </td>
-        <td style="padding:.5rem .4rem;">{% if t.type == 'search' %}🔍{% else %}📌{% endif %}</td>
-        <td style="padding:.5rem .4rem; width:100%;">
-          <span class="badge badge-grey">{{ t.source_name }}</span> {{ t.label }}
+        <td style="padding:.5rem .4rem;">{% if t.type != 'group' %}<input type="checkbox" name="ids" value="{{ t.id }}" form="group-form" title="Zum Zusammenlegen auswählen">{% endif %}</td>
+        <td style="padding:.5rem .4rem;">{% if t.type == 'group' %}🗂{% elif t.type == 'search' %}🔍{% else %}📌{% endif %}</td>
+        <td style="padding:.5rem .4rem; width:100%;{% if t.parent_id %} padding-left:1.6rem;{% endif %}">
+          {% if t.type == 'group' %}<b>{{ t.label }}</b> <span class="muted">(Gruppe)</span>{% else %}<span class="badge badge-grey">{{ t.source_name }}</span> {{ t.label }}{% endif %}
           {% if t.type == 'listing' %}<div class="muted" style="font-size:.72rem; word-break:break-all;">{{ t.url }}</div>{% endif %}
         </td>
         <td style="padding:.5rem .4rem; white-space:nowrap;">
@@ -150,12 +151,20 @@
         <td style="padding:.5rem .4rem; text-align:right;">
           <button class="btn btn-outline btn-sm refresh-btn" type="button" title="Nur diesen Tracker aktualisieren"
                   onclick="refreshTracker({{ t.id }}, this)">↻</button>
+          {% if t.parent_id %}
+          <form method="post" action="{{ url_for('ungroup_tracker', tracker_id=t.id) }}" style="display:inline;">
+            <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+            <button class="btn btn-outline btn-sm" type="submit" title="Aus Gruppe lösen">⛓</button>
+          </form>
+          {% endif %}
+          {% if t.type != 'group' %}
           <form method="post" action="{{ url_for('pause_tracker', tracker_id=t.id) }}" style="display:inline;">
             <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
             <button class="btn btn-outline btn-sm" type="submit" title="{{ 'Pausieren (nicht mehr abfragen, einklappen)' if t.enabled else 'Fortsetzen' }}">{{ '⏸' if t.enabled else '▶' }}</button>
           </form>
+          {% endif %}
           <form method="post" action="{{ url_for('delete_tracker', tracker_id=t.id) }}"
-                style="display:inline;" onsubmit="return confirm('Delete this tracker?');">
+                style="display:inline;" onsubmit="return confirm('{{ 'Gruppe auflösen (Tracker bleiben erhalten)?' if t.type == 'group' else 'Delete this tracker?' }}');">
             <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
             <button class="btn btn-danger btn-sm" type="submit">✕</button>
           </form>
@@ -164,6 +173,11 @@
       {% endfor %}
     </tbody>
   </table>
+  <form method="post" action="{{ url_for('create_group') }}" id="group-form" style="margin-top:.85rem; display:flex; gap:.5rem; flex-wrap:wrap;">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <input type="text" name="label" placeholder="Name der Gruppe" style="flex:1; min-width:10rem;">
+    <button class="btn btn-outline" type="submit">🗂 Ausgewählte zusammenlegen</button>
+  </form>
 </details>
 {% endif %}
 
@@ -208,12 +222,12 @@
 <!-- tracker overview (active trackers; paused ones collapsed at the bottom) -->
 <div id="overview">
 <div class="grid" id="tracker-grid">
-  {% for t in tracker_cards if t.enabled %}
+  {% for t in tracker_cards if t.enabled and not t.parent_id %}
   {{ tracker_card(t, session.logged_in) }}
   {% endfor %}
 </div>
 
-{% set paused = tracker_cards|rejectattr('enabled')|list %}
+{% set paused = tracker_cards|rejectattr('enabled')|rejectattr('parent_id')|list %}
 {% if paused %}
 <details class="card gap" id="paused-trackers" style="margin-top:1.5rem;">
   <summary style="cursor:pointer; font-weight:600;">Pausierte Tracker ({{ paused|length }})</summary>

@@ -85,6 +85,14 @@ count, summary}` (or an error) — the frontend calls it live as the user pastes
    buttons are disabled and further requests get 409 (the initial poll of a new
    tracker is exempt).
 
+### Tracker groups
+
+Trackers can be merged ("Tracker verwalten" → tick checkboxes → "Ausgewählte zusammenlegen"). A group is a
+`trackers` row with `type='group'` (`source=''`, never polled; `get_trackers(enabled_only=True)` skips it);
+members point to it via `trackers.parent_id`. The overview shows only the group card (members hidden); its
+detail view (`/tracker/<group id>`) lists the union of the members' listings, ↻ polls all members. Deleting a
+group only dissolves it; a group left without members is removed (`db._drop_empty_groups`).
+
 ### Tracker detail view (`/tracker/<id>`)
 
 Rendered client-side from `CARDS`/`TRACKERS` (index payload). Each listing card shows its

@@ -207,6 +207,10 @@ def init_db():
         if 'position' not in {r[1] for r in conn.execute('PRAGMA table_info(trackers)')}:
             conn.execute('ALTER TABLE trackers ADD COLUMN position INTEGER NOT NULL DEFAULT 0')
             conn.execute('UPDATE trackers SET position = id')   # keep the existing order
+        # Groups: a tracker row with type='group' (never polled); its members point to it via parent_id.
+        _add_columns_if_missing(conn, 'trackers', {
+            'parent_id': 'INTEGER REFERENCES trackers(id) ON DELETE SET NULL',
+        })
         # Only gradient boosting is supported: drop models of any other algorithm (+ their predictions).
         conn.execute("DELETE FROM fair_prices WHERE model_id IN "
                      "(SELECT id FROM ml_models WHERE algo != 'gradient_boosting')")
@@ -372,8 +376,15 @@ def get_tracker(tracker_id: int) -> dict | None:
         return _row_to_tracker(row) if row else None
 
 
-def get_trackers(enabled_only: bool = False) -> list[dict]:
-    clause = 'WHERE enabled = 1' if enabled_only else ''
+def get_trackers(enabled_only: bool = False, groups: bool = True) -> list[dict]:
+    """All trackers. `enabled_only` is the polling view and never includes groups
+    (they have nothing to poll); `groups=False` leaves them out otherwise."""
+    conds = []
+    if enabled_only:
+        conds.append('enabled = 1')
+    if enabled_only or not groups:
+        conds.append("type != 'group'")
+    clause = 'WHERE ' + ' AND '.join(conds) if conds else ''
     with get_db() as conn:
         return [_row_to_tracker(r) for r in conn.execute(
             f'SELECT * FROM trackers {clause} ORDER BY position, id'
@@ -405,11 +416,50 @@ def reorder_trackers(ids: list[int]):
             conn.execute('UPDATE trackers SET position = ? WHERE id = ?', (pos, tid))
 
 
+def create_group(label: str, member_ids: list[int]) -> int | None:
+    """Merge the given (non-group, ungrouped or grouped) trackers into a new group.
+    Returns the group id, or None if fewer than 2 valid trackers were given."""
+    with get_db() as conn:
+        marks = ','.join('?' * len(member_ids))
+        ids = [r['id'] for r in conn.execute(
+            f"SELECT id FROM trackers WHERE type != 'group' AND id IN ({marks})", member_ids)]
+        if len(ids) < 2:
+            return None
+        cur = conn.execute(
+            "INSERT INTO trackers (source, type, label, position) "
+            "VALUES ('', 'group', ?, (SELECT COALESCE(MAX(position), 0) + 1 FROM trackers))",
+            (label.strip() or 'Gruppe',))
+        gid = cur.lastrowid
+        conn.execute(f'UPDATE trackers SET parent_id = ? WHERE id IN ({",".join("?" * len(ids))})',
+                     [gid, *ids])
+        _drop_empty_groups(conn)
+        return gid
+
+
+def set_tracker_group(tracker_id: int, group_id: int | None) -> bool:
+    """Put a tracker into an existing group (None = take it out)."""
+    with get_db() as conn:
+        if group_id is not None and not conn.execute(
+                "SELECT 1 FROM trackers WHERE id = ? AND type = 'group'", (group_id,)).fetchone():
+            return False
+        conn.execute("UPDATE trackers SET parent_id = ? WHERE id = ? AND type != 'group'",
+                     (group_id, tracker_id))
+        _drop_empty_groups(conn)
+        return True
+
+
+def _drop_empty_groups(conn):
+    conn.execute("DELETE FROM trackers WHERE type = 'group' AND id NOT IN "
+                 "(SELECT parent_id FROM trackers WHERE parent_id IS NOT NULL)")
+
+
 def delete_tracker(tracker_id: int):
     """Delete a tracker (its memberships cascade), then drop any listing left
-    with no tracker referencing it, and refresh active flags."""
+    with no tracker referencing it, and refresh active flags. Deleting a group
+    only dissolves it: its members stay."""
     with get_db() as conn:
         conn.execute('DELETE FROM trackers WHERE id = ?', (tracker_id,))
+        _drop_empty_groups(conn)
         conn.execute(
             'DELETE FROM listings WHERE id NOT IN '
             '(SELECT listing_id FROM tracker_listings)'
