@@ -50,6 +50,7 @@ DETAIL_DELAY = (1.0, 3.0)                # random pause range (s) between ad-pag
 
 BACKOFF_START = timedelta(minutes=10)    # block after the first 403/429 …
 BACKOFF_MAX = timedelta(hours=24)        # … doubling with every further one, up to this cap
+MAX_POLL_WAIT = timedelta(hours=4)       # a poll waits out blocks ending within this of its start
 
 
 def _block_key(source) -> str:
@@ -101,6 +102,13 @@ class _DetailJob:
         self.priceless: set[int] = set()   # trackers whose search card had no price
 
 
+class _Limited(Exception):
+    """A fetch hit HTTP 403/429: the item stays queued (retried after the block).
+    *back* = the same ad also hit the previous block → retry it last."""
+    def __init__(self, back: bool):
+        self.back = back
+
+
 def _fetch_detail(job: _DetailJob):
     """Fetch the whole ad page and archive it (all images, description, details,
     original HTML). A failed/removed fetch changes nothing — activity is decided by
@@ -112,9 +120,10 @@ def _fetch_detail(job: _DetailJob):
     try:
         full = job.source.fetch_listing(job.url)
     except RateLimited:
-        if _register_block(source, job.lid):
+        repeat = _register_block(source, job.lid)
+        if repeat:
             db.mark_detail_tried(job.lid, now)
-        return None
+        raise _Limited(repeat)
     except Exception as e:
         logger.warning('Detail fetch failed %s: %s', job.url, e)
         db.mark_detail_tried(job.lid, now)
@@ -128,22 +137,51 @@ def _fetch_detail(job: _DetailJob):
     return full
 
 
-def _run_details(jobs: dict, stats: dict):
-    """Phase 2: archive the due ad pages of all trackers polled in phase 1, least
-    recently attempted first, so ads left over by a rate-limit block are the first
-    to be fetched next time. Stops per source once it is blocked."""
-    cutoff = (datetime.utcnow() - DETAIL_INTERVAL).isoformat()
-    for lid in db.detail_queue(jobs, cutoff):
-        job = jobs[lid]
-        if _detail_blocked_until(job.source):
-            continue
-        full = _fetch_detail(job)
-        # If a search card carried no price (extraction problem), fall back to
-        # the price on the ad's own page.
-        if job.priceless and full and (full.price is not None or full.price_text):
-            db.add_price(lid, job.seen_at, full.price, full.price_text)
-            for tid in job.priceless:
-                stats[tid]['rescued'] += 1
+def _detail_item(job: _DetailJob, stats: dict):
+    full = _fetch_detail(job)
+    # If a search card carried no price (extraction problem), fall back to the
+    # price on the ad's own page.
+    if job.priceless and full and (full.price is not None or full.price_text):
+        db.add_price(job.lid, job.seen_at, full.price, full.price_text)
+        for tid in job.priceless:
+            stats[tid]['rescued'] += 1
+
+
+def _drain(queue: list, started: datetime):
+    """Work through *queue* (list of (source, label, fn)). Items of a source that is
+    rate-limited are held back while the others continue; once only held-back items
+    are left, wait for the block to end and resume — unless the block would end later
+    than MAX_POLL_WAIT after the poll started, then they are left for the next poll
+    (where they come first, as least recently attempted)."""
+    while queue:
+        held, last = [], []
+        for item in queue:
+            source, label, fn = item
+            if _detail_blocked_until(source):
+                held.append(item)
+                continue
+            try:
+                fn()
+            except _Limited as e:
+                (last if e.back else held).append(item)   # retried first, or last if repeat
+            except Exception as e:
+                logger.error('%s failed: %s', label, e)
+        queue = held + last
+        if not queue:
+            break
+        until = min(filter(None, (_detail_blocked_until(src) for src in {i[0] for i in queue})),
+                    default=None)
+        if until is None:
+            continue                      # block already over: go on right away
+        if until > started + MAX_POLL_WAIT:
+            logger.warning('%d ad pages left for the next poll — rate-limit block runs until '
+                           '%s UTC, beyond this poll\'s wait limit', len(queue),
+                           until.isoformat(timespec='seconds'))
+            break
+        wait = (until - datetime.utcnow()).total_seconds() + 5
+        logger.info('Waiting %.0f min for the rate-limit block to end (%d ad pages left)',
+                    wait / 60, len(queue))
+        time.sleep(max(wait, 0))
 
 
 def poll_tracker(tracker: dict):
@@ -161,34 +199,43 @@ def poll_all_due():
 
 
 def _poll(trackers: list[dict]):
-    """Phase 1: every search tracker (prices, memberships, deactivation), then the
-    single-listing trackers, least recently attempted first. Phase 2: the full ad
-    pages of all search hits, in one shared, prioritised queue."""
+    """Phase 1: every search tracker (prices, memberships, deactivation; no ad pages).
+    Phase 2: the single-listing trackers, then the due ad pages of all search hits —
+    each group least recently attempted first — with rate-limit blocks waited out
+    (`_drain`)."""
+    started = datetime.utcnow()
     jobs: dict[int, _DetailJob] = {}
     stats: dict[int, dict] = {}
-    searches = [t for t in trackers if t['type'] == 'search']
-    singles = [t for t in trackers if t['type'] == 'listing']
-    for t in trackers:
-        if t['type'] not in ('search', 'listing'):
-            logger.warning('Unknown type %r (tracker %s)', t['type'], t['id'])
-    ads = db.listing_tracker_ads(t['id'] for t in singles)
-    singles.sort(key=lambda t: (t['id'] in ads and ads[t['id']][1] is not None,
-                                ads.get(t['id'], (0, ''))[1] or ''))
-    for tracker in searches + singles:
+    singles = []
+    for tracker in trackers:
+        if tracker['type'] not in ('search', 'listing'):
+            logger.warning('Unknown type %r (tracker %s)', tracker['type'], tracker['id'])
+            continue
         try:
             source = sources.get(tracker['source'])
         except KeyError:
             logger.warning('Unknown source %r (tracker %s)', tracker['source'], tracker['id'])
             continue
+        if tracker['type'] == 'listing':
+            singles.append((tracker, source))
+            continue
         try:
-            if tracker['type'] == 'listing':
-                _poll_listing_tracker(tracker, source, ads.get(tracker['id'], (None,))[0])
-            else:
-                stats[tracker['id']] = _poll_search_tracker(tracker, source, jobs)
+            stats[tracker['id']] = _poll_search_tracker(tracker, source, jobs)
         except Exception as e:
             logger.error('Poll failed for tracker %d: %s', tracker['id'], e)
+
+    ads = db.listing_tracker_ads(t['id'] for t, _ in singles)
+    singles.sort(key=lambda ts: (ads.get(ts[0]['id'], (0, None))[1] is not None,
+                                 ads.get(ts[0]['id'], (0, None))[1] or ''))
+    queue = [(src, f'Poll of tracker {t["id"]}',
+              lambda t=t, src=src: _poll_listing_tracker(t, src, ads.get(t['id'], (None,))[0]))
+             for t, src in singles]
     try:
-        _run_details(jobs, stats)
+        cutoff = (datetime.utcnow() - DETAIL_INTERVAL).isoformat()
+        queue += [(jobs[lid].source, f'Detail fetch of listing {lid}',
+                   lambda job=jobs[lid]: _detail_item(job, stats))
+                  for lid in db.detail_queue(jobs, cutoff)]
+        _drain(queue, started)
     except Exception as e:
         logger.error('Detail archiving failed: %s', e)
     for tid, s in stats.items():
@@ -200,20 +247,16 @@ def _poll(trackers: list[dict]):
 
 
 def _poll_listing_tracker(tracker: dict, source, lid: int | None):
-    """Fetch the tracked ad. Subject to the source's rate-limit backoff like the
-    detail queue: while blocked it is skipped (nothing is deactivated), a 403/429
-    starts/extends the block. *lid* = the tracker's listing if already known."""
-    if until := _detail_blocked_until(source):
-        logger.info('Listing tracker %d (%s): skipped, ad pages blocked until %s UTC',
-                    tracker['id'], source.name, until.isoformat(timespec='seconds'))
-        return
+    """Fetch the tracked ad. A 403/429 raises `_Limited` (retried after the block,
+    nothing is deactivated). *lid* = the tracker's listing if already known."""
     seen_at = _now()
     try:
         scraped = source.fetch_listing(tracker['url'])
     except RateLimited:
-        if _register_block(source, lid) and lid:
+        repeat = _register_block(source, lid) and lid is not None
+        if repeat:
             db.mark_detail_tried(lid, seen_at)
-        return
+        raise _Limited(repeat)
     _clear_block(source)
 
     if scraped is None:

@@ -204,15 +204,18 @@ schema (no `trackers.source` column). No backward compatibility is maintained.
   (`Source.archive_details`, `poller._fetch_detail`): all images, description,
   details, original HTML → `listing_versions` + `archive/images/`.
   A poll runs in **two phases** (`poller._poll`): first all trackers' searches
-  (prices, memberships, deactivation), then one shared queue of the due ad pages
-  (`db.detail_queue`), ordered by `listings.detail_tried_at` ascending (never tried
-  first) — a round-robin, so ads left over by a 403 block come first next run and
-  permanently failing pages move to the back. A 403/429 does not count as an
-  attempt, unless the same ad also hit the previous block. Price rescue for search
-  cards without a price (`poll_stats.rescued`) happens in phase 2. Single-listing
-  trackers run after the searches, also least recently attempted first, and share
-  the backoff: skipped while blocked, a 403/429 never marks the ad inactive.
-  Both sources raise `RateLimited` on HTTP 403/429 from ad pages.
+  (prices, memberships, deactivation), then one queue (`poller._drain`) of the
+  single-listing trackers followed by the due ad pages (`db.detail_queue`), each
+  ordered by `listings.detail_tried_at` ascending (never tried first) — a
+  round-robin, so permanently failing pages move to the back. A 403/429 does not
+  count as an attempt, unless the same ad also hit the previous block, and never
+  marks an ad inactive. While a source is blocked its items are held back and the
+  other sources continue; when only held items are left the poll **waits for the
+  block to end and resumes** (blocked ad first), unless the block ends more than
+  `MAX_POLL_WAIT` (4 h) after the poll started — then the rest is left for the next
+  poll, where it comes first. Price rescue for search cards without a price
+  (`poll_stats.rescued`) happens in phase 2. Both sources raise `RateLimited` on
+  HTTP 403/429 from ad pages.
 
 ### ImmoScout24
 - Locations: `GET https://www.immobilienscout24.de/geoautocomplete/v3/locations.json?i=…`
