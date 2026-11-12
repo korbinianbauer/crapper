@@ -615,7 +615,9 @@ def _fair_info(listing_id, prices):
         return int(v) if isinstance(v, float) and v.is_integer() else v
     pred = next((x for x in db.get_listing_predictions(listing_id) if x['feature_set_id'] == fair['fs_id']), None)
     # effect of each value on the fair price, cached by ml.refresh_predictions (fractions of the model's value)
-    imp = {key: v * fair['fair_price'] for key, v in ((pred or {}).get('data') or {}).get('impacts', {}).items()}
+    stored = ((pred or {}).get('data') or {}).get('impacts')
+    # features missing from the stored dict have (almost) no effect -> 0; None only if nothing was stored
+    imp = {f['key']: (stored.get(f['key'], 0.0) * fair['fair_price']) for f in fair['definition']['features']} if stored else {}
     fair['facts'] = [(f['label'], show(f, fair['features'].get(f['key'])), imp.get(f['key']))
                      for f in fair['definition']['features']]
     cost = fair.get('cost')
