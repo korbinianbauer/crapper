@@ -190,7 +190,7 @@ price and the ML rating (`fair_delta` = asking price vs. fair price in %, negati
   assumptions — so changed assumptions only apply from the next training. Sale feature sets have no `_cost`.
 - **`listing_predictions`** — persisted results of each feature set's **active** model per listing (PK listing+feature set,
   JSON: `fair_price` raw, `heat_kwh_m2` + `heat_kwh_src` (GB estimate — always the model's own value, even if the ad states one),
-  `heat_used` (anzeige|prognose), `heat_eur`, `heat_eur_kwh`, `nk_eur`/`nk_src`). Written by `ml.refresh_predictions(fs_id[, ids])`:
+  `heat_used` (anzeige|prognose), `heat_eur`, `heat_eur_kwh`, `nk_eur`/`nk_src`, `impacts` = {feature: effect of the listing's value on the fair price as fraction of the model's own prediction, from `ml.feature_impacts` — value vs. 120 random training listings; the archive table shows it × fair price in €}). Written by `ml.refresh_predictions(fs_id[, ids])`:
   after `ml.train`, after `ml.predict` (new listings), on choosing/deleting the active model (settings); CLI `python ml.py refresh [set]`.
   Pricing/rating use extracted values (`_cost`) where available, these predictions as fallback. Shown on the archive page next to
   the extracted features.

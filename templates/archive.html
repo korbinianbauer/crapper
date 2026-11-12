@@ -42,6 +42,9 @@
   .fair-feats > div { display:flex; justify-content:space-between; gap:1rem; padding:.18rem 0;
                       border-bottom:1px solid var(--border); }
   .fair-feats b { color:var(--text); font-weight:600; text-align:right; }
+  .fair-feats em.imp { display:inline-block; min-width:4.2rem; margin-left:.7rem; font-style:normal; font-weight:500; font-size:.75rem; color:var(--muted); }
+  .fair-feats em.imp.up { color:#2563eb; }
+  .fair-feats em.imp.down { color:#dc2626; }
   .fair-feats b.unk { color:var(--muted); font-weight:400; }
   .feat-cols { display:grid; grid-template-columns:minmax(0,2fr) minmax(0,1fr); gap:1rem 2.5rem; margin-top:.6rem; }
   @media (max-width:900px) { .feat-cols { grid-template-columns:1fr; } }
@@ -148,9 +151,9 @@
   {% endif %}
   {% if fair.facts %}<details><summary>Eigenschaften: extrahiert ({{ fair.facts|length }}){% if fair.predicted %} &amp; vom Modell geschätzt ({{ fair.predicted.rows|length }}){% endif %}</summary>
     <div class="feat-cols">
-      <div><div class="lbl">Extrahiert aus der Anzeige</div>
-        <div class="fair-feats">{% for label, v in fair.facts %}
-          <div><span>{{ label }}</span><b class="{{ 'unk' if v == 'unbekannt' }}">{{ v }}</b></div>{% endfor %}
+      <div><div class="lbl">Extrahiert aus der Anzeige · Einfluss auf den angemessenen Preis</div>
+        <div class="fair-feats">{% for label, v, imp in fair.facts %}
+          <div><span>{{ label }}</span><b class="{{ 'unk' if v == 'unbekannt' }}">{{ v }}{% if imp is not none %}<em class="imp {{ 'up' if imp >= 0.5 else ('down' if imp <= -0.5 else '') }}" title="Einfluss dieses Werts auf den angemessenen Preis gegenüber dem typischen Wert der Trainingsdaten">{% if imp|abs < 0.5 %}±0{% else %}{{ '%+d'|format(imp|round|int) }}{% endif %} €</em>{% endif %}</b></div>{% endfor %}
         </div></div>
       {% if fair.predicted %}<div><div class="lbl">Vom Modell geschätzt · Modell {{ fair.predicted.model_id }} · {{ fair.predicted.predicted_at[:16].replace('T', ' ') }}</div>
         <div class="fair-feats one">{% for label, v, note in fair.predicted.rows %}

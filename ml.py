@@ -487,10 +487,12 @@ def predict(feature_set_name: str, listing_ids=None, model_id: int | None = None
     return len(todo)
 
 
-def listing_results(fair_raw, cost, features, assume, cmodels):
+def listing_results(fair_raw, cost, features, assume, cmodels, impacts=None):
     """Everything the active model (incl. its cost sub-models) predicts for one listing — stored in
     `listing_predictions` and shown on the archive page."""
     out = {'fair_price': round(fair_raw, 2)}
+    if impacts:      # effect of each feature value, as fraction of the model's own prediction
+        out['impacts'] = impacts
     if cost is None or not assume:
         return out
     a = {**DEFAULT_COSTS, **assume}
@@ -522,11 +524,42 @@ def refresh_predictions(feature_set_id: int, listing_ids=None) -> int:
         metrics = json.loads(conn.execute('SELECT metrics FROM ml_models WHERE id = ?', (mid,)).fetchone()[0])
     assume, cm = metrics.get('cost_assumptions'), cost_models_for(mid)
     wanted = None if listing_ids is None else set(listing_ids)
-    rows = {r['listing_id']: listing_results(fair[r['listing_id']], r.get('cost'), r['features'], assume, cm)
+    def impacts(r):
+        try:
+            own, imp = feature_impacts(mid, feature_set_id, r['features'])
+            return {k: round(v / own, 4) for k, v in imp.items() if own and abs(v / own) >= 0.0005}
+        except Exception as e:
+            print(f'feature_impacts failed for listing {r["listing_id"]}: {e}')
+            return None
+    rows = {r['listing_id']: listing_results(fair[r['listing_id']], r.get('cost'), r['features'], assume, cm, impacts(r))
             for r in db.get_training_rows(feature_set_id)
             if r['listing_id'] in fair and (wanted is None or r['listing_id'] in wanted)}
     db.save_listing_predictions(feature_set_id, mid, rows, replace_all=wanted is None)
     return len(rows)
+
+
+_IMPACT_CACHE = {}
+
+
+def feature_impacts(model_id, fs_id, features, n_ref=120):
+    """Per-feature effect (in model units, e.g. € of the fair price) for ONE listing: prediction with
+    the listing's own value minus the mean prediction when that feature is replaced by the values of
+    reference listings (random sample of the training data). Not additive in general. -> (own prediction, {key: €})"""
+    if model_id not in _IMPACT_CACHE:
+        _IMPACT_CACHE.clear()
+        row = db.get_model(model_id)
+        art = _load_artifact(row['artifact'])
+        rows = [r['features'] for r in db.get_training_rows(fs_id)]
+        rng = np.random.RandomState(0)
+        if len(rows) > n_ref:
+            rows = [rows[i] for i in rng.choice(len(rows), n_ref, replace=False)]
+        _IMPACT_CACHE[model_id] = (art['encoder'], art['model'], rows)
+    enc, model, refs = _IMPACT_CACHE[model_id]
+    own = float(np.exp(model.predict(enc.transform([features]))[0]))
+    keys = [f['key'] for f in enc.features]
+    batch = [{**features, k: r.get(k)} for k in keys for r in refs]
+    pred = np.exp(model.predict(enc.transform(batch))).reshape(len(keys), len(refs)).mean(axis=1)
+    return own, {k: own - float(p) for k, p in zip(keys, pred)}
 
 
 def _importances(model, algo, X, y, names):

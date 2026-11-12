@@ -613,13 +613,16 @@ def _fair_info(listing_id, prices):
         if f['type'] == 'bool':
             return 'Ja' if v else 'Nein'
         return int(v) if isinstance(v, float) and v.is_integer() else v
-    fair['facts'] = [(f['label'], show(f, fair['features'].get(f['key'])))
+    pred = next((x for x in db.get_listing_predictions(listing_id) if x['feature_set_id'] == fair['fs_id']), None)
+    # effect of each value on the fair price, cached by ml.refresh_predictions (fractions of the model's value)
+    imp = {key: v * fair['fair_price'] for key, v in ((pred or {}).get('data') or {}).get('impacts', {}).items()}
+    fair['facts'] = [(f['label'], show(f, fair['features'].get(f['key'])), imp.get(f['key']))
                      for f in fair['definition']['features']]
     cost = fair.get('cost')
     if cost is not None:          # extracted cost data that the model also predicts
         heat = cost.get('heat') or {}
-        fair['facts'] += [('Energieträger', CARRIER_LABELS.get(heat.get('carrier'), 'unbekannt')),
-                          ('Energiebedarf (kWh/m²·a)', _num(heat.get('kwh')) if heat.get('kwh') else 'unbekannt')]
+        fair['facts'] += [('Energieträger', CARRIER_LABELS.get(heat.get('carrier'), 'unbekannt'), None),
+                          ('Energiebedarf (kWh/m²·a)', _num(heat.get('kwh')) if heat.get('kwh') else 'unbekannt', None)]
     fair['predicted'] = _predicted_facts(listing_id, fair)
     return fair
 
