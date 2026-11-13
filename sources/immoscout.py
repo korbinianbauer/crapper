@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
-from .base import RateLimited, ScrapedListing, Source, UrlInfo
+from .base import RateLimited, ScrapedListing, SearchIncomplete, Source, UrlInfo
 
 logger = logging.getLogger(__name__)
 
@@ -257,9 +257,11 @@ class ImmoScoutSource(Source):
         for page in range(1, max_pages + 1):
             data = self._api_get(parsed, page)
             if data is None:
-                break
+                raise SearchIncomplete(f'IS24 search page {page} failed', list(seen.values()))
             results = data.get('results') or []
             if not results:
+                if page == 1 and data.get('totalResults'):
+                    raise SearchIncomplete('IS24 search page 1 came back empty', [])
                 break
             for item in results:
                 listing = self._parse_item(item)

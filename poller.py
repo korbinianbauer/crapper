@@ -11,7 +11,7 @@ import archive
 import db
 import pagearchive
 import sources
-from sources.base import RateLimited
+from sources.base import RateLimited, SearchIncomplete
 
 logger = logging.getLogger(__name__)
 
@@ -406,7 +406,13 @@ def _poll_search_tracker(tracker: dict, source, jobs: dict) -> dict:
     except ValueError:
         max_pages = 5
 
-    results = source.fetch_search(tracker['url'], max_pages=max_pages)
+    complete = True
+    try:
+        results = source.fetch_search(tracker['url'], max_pages=max_pages)
+    except SearchIncomplete as e:
+        results, complete = e.results, False
+        logger.warning('Search tracker %d (%s) incomplete: %s — %d listings read, nothing deactivated',
+                       tracker['id'], source.name, e, len(results))
     priced = 0
     for r in results:
         lid = _upsert(source, r, seen_at)
@@ -421,8 +427,9 @@ def _poll_search_tracker(tracker: dict, source, jobs: dict) -> dict:
             if not has_price:
                 job.priceless.add(tracker['id'])
 
-    # Anything not refreshed this run has dropped out of the search → inactive.
-    db.deactivate_missing(tracker['id'], seen_at)
+    # Anything not refreshed this run has dropped out of the search → inactive (only if it was read completely).
+    if complete:
+        db.deactivate_missing(tracker['id'], seen_at)
     logger.info('Search tracker %d (%s): %d listings found', tracker['id'], source.name,
                 len(results))
     return {'seen_at': seen_at, 'found': len(results), 'priced': priced, 'rescued': 0}

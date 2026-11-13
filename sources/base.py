@@ -13,6 +13,14 @@ class RateLimited(Exception):
     Distinct from "ad removed" (None) so callers can back off instead of giving up."""
 
 
+class SearchIncomplete(Exception):
+    """A search could not be read completely (HTTP error, block page …). `results` holds what was read.
+    The poller still stores those, but must NOT deactivate the listings it did not see."""
+    def __init__(self, message: str, results: list | None = None):
+        super().__init__(message)
+        self.results = results or []
+
+
 @dataclass
 class ScrapedListing:
     """Normalised listing returned by every source."""

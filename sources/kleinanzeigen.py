@@ -15,7 +15,7 @@ from urllib.parse import urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 
-from .base import RateLimited, ScrapedListing, Source, UrlInfo
+from .base import RateLimited, ScrapedListing, SearchIncomplete, Source, UrlInfo
 
 logger = logging.getLogger(__name__)
 
@@ -364,11 +364,13 @@ class KleinanzeigenSource(Source):
                 resp.raise_for_status()
             except Exception as e:
                 logger.error('KA search failed (p%d): %s', page, e)
-                break
+                raise SearchIncomplete(f'KA search page {page} failed: {e}', list(seen.values()))
             if total is None:
                 total = self._parse_total(resp.text)
             page_results = self._parse_page(resp.text)
             if not page_results:
+                if page == 1 and (total is None or total > 0):      # block page / layout change, not "no ads"
+                    raise SearchIncomplete('KA search page 1 had no ads', [])
                 break
             new = sum(1 for r in page_results if r.ad_id not in seen)
             for r in page_results:
