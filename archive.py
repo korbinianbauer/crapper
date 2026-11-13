@@ -18,8 +18,8 @@ logger = logging.getLogger(__name__)
 
 IMG_DIR = os.path.join(os.path.dirname(__file__), 'archive', 'images')
 JPEG_QUALITY = 85
-THUMB_DIR = os.path.join(os.path.dirname(__file__), 'archive', 'thumbs')
-THUMB_EDGE = 256                # px; longest side of the card thumbnails
+THUMB_W, THUMB_H = 384, 288     # px; card thumbnails are cropped to the card's 4:3 box (`.gallery` in index.html)
+THUMB_DIR = os.path.join(os.path.dirname(__file__), 'archive', f'thumbs-{THUMB_W}x{THUMB_H}')
 MAX_EDGE = 2000                 # px; larger photos are scaled down (aspect ratio kept)
 _TYPES = {'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif'}
 
@@ -167,8 +167,8 @@ def recompress(name: str) -> str:
 
 
 def thumbnail(name: str) -> str | None:
-    """Path of the card thumbnail (longest side THUMB_EDGE, JPEG) of archived image *name*, created on first
-    use from the archived file and cached in archive/thumbs/<stem>.jpg (the stem survives a PNG→JPG
+    """Path of the card thumbnail (JPEG, centre-cropped to the card's 4:3 box, at most THUMB_W x THUMB_H) of archived image *name*, created on first
+    use from the archived file and cached in archive/thumbs-<w>x<h>/<stem>.jpg (the stem survives a PNG→JPG
     conversion of the original). Transparency is flattened onto white. None if it cannot be made."""
     if Image is None or not name or '/' in name or name.startswith('.'):
         return None
@@ -183,7 +183,15 @@ def thumbnail(name: str) -> str | None:
             bg.paste(im, mask=im.getchannel('A'))
             im = bg
         im = im.convert('RGB')
-        im.thumbnail((THUMB_EDGE, THUMB_EDGE), Image.LANCZOS)
+        w, h = im.size                    # centre crop to 4:3 = what `object-fit: cover` would show
+        if w * THUMB_H > h * THUMB_W:
+            nw = round(h * THUMB_W / THUMB_H)
+            im = im.crop(((w - nw) // 2, 0, (w - nw) // 2 + nw, h))
+        else:
+            nh = round(w * THUMB_H / THUMB_W)
+            im = im.crop((0, (h - nh) // 2, w, (h - nh) // 2 + nh))
+        if im.width > THUMB_W:            # never enlarge
+            im = im.resize((THUMB_W, THUMB_H), Image.LANCZOS)
         os.makedirs(THUMB_DIR, exist_ok=True)
         tmp = f'{out}.{os.getpid()}.{threading.get_ident()}.tmp'
         im.save(tmp, 'JPEG', quality=JPEG_QUALITY, optimize=True)
