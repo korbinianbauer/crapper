@@ -31,20 +31,23 @@ def _upsert(source, r, seen_at) -> int:
 
 
 def recompress_images(source, lid):
-    """Convert the listing's already archived images to the current storage format (once per file)."""
+    """Convert the listing's already archived images to the current storage format (once per file) and
+    make sure its card thumbnail exists."""
     try:
         for u in db.listing_image_urls(lid):
             for url in dict.fromkeys([source.full_image_url(u), u]):
                 if name := archive.local_name(url):
                     archive.recompress(name)
+        if (l := db.get_listing(lid)) and (name := archive.best_image_file(source, l['image_url'], l['image_file'])):
+            archive.thumbnail(name)          # cheap no-op if it already exists
     except Exception:
         logger.exception('Image recompression failed for listing %s', lid)
 
 
 def recompress_work(trackers: list[dict]):
     """Generator: convert the archived images of *all* listings of the polled trackers — also those that
-    vanished from their source — to the current storage format, one listing per step. Driven by `_drain`
-    while it waits out a rate limit, and to the end after the poll."""
+    vanished from their source — to the current storage format and create their card thumbnails, one
+    listing per step. Driven by `_drain` while it waits out a rate limit, and to the end after the poll."""
     done: set[int] = set()
     for tracker in trackers:
         try:

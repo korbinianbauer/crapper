@@ -192,3 +192,15 @@ def thumbnail(name: str) -> str | None:
     except Exception as e:
         logger.warning('Thumbnail failed for %s: %s', name, e)
         return None
+
+
+def best_image_file(source, image_url: str | None, image_file: str | None) -> str | None:
+    """File the card thumbnail is made from: the large variant of the ad's picture if archived (search
+    cards only carry a tiny one), else the archived card file."""
+    if image_url:
+        try:
+            if name := local_name(source.full_image_url(image_url)):
+                return name
+        except Exception:
+            pass
+    return image_file
