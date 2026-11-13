@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 IMG_DIR = os.path.join(os.path.dirname(__file__), 'archive', 'images')
 JPEG_QUALITY = 85
+THUMB_DIR = os.path.join(os.path.dirname(__file__), 'archive', 'thumbs')
+THUMB_EDGE = 256                # px; longest side of the card thumbnails
 MAX_EDGE = 2000                 # px; larger photos are scaled down (aspect ratio kept)
 _TYPES = {'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif'}
 
@@ -163,3 +165,30 @@ def recompress(name: str) -> str:
     logger.info('Image %s: %d → %d bytes', new_name, len(data), len(new_data))
     return new_name
 
+
+def thumbnail(name: str) -> str | None:
+    """Path of the card thumbnail (longest side THUMB_EDGE, JPEG) of archived image *name*, created on first
+    use from the archived file and cached in archive/thumbs/<stem>.jpg (the stem survives a PNG→JPG
+    conversion of the original). Transparency is flattened onto white. None if it cannot be made."""
+    if Image is None or not name or '/' in name or name.startswith('.'):
+        return None
+    out = os.path.join(THUMB_DIR, os.path.splitext(name)[0] + '.jpg')
+    if os.path.exists(out):
+        return out
+    try:
+        im = ImageOps.exif_transpose(Image.open(os.path.join(IMG_DIR, name)))
+        if _has_transparency(im):
+            im = im.convert('RGBA')
+            bg = Image.new('RGB', im.size, (255, 255, 255))
+            bg.paste(im, mask=im.getchannel('A'))
+            im = bg
+        im = im.convert('RGB')
+        im.thumbnail((THUMB_EDGE, THUMB_EDGE), Image.LANCZOS)
+        os.makedirs(THUMB_DIR, exist_ok=True)
+        tmp = f'{out}.{os.getpid()}.{threading.get_ident()}.tmp'
+        im.save(tmp, 'JPEG', quality=JPEG_QUALITY, optimize=True)
+        os.replace(tmp, out)
+        return out
+    except Exception as e:
+        logger.warning('Thumbnail failed for %s: %s', name, e)
+        return None

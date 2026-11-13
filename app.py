@@ -1,4 +1,5 @@
 import difflib
+import hashlib
 import hmac
 import io
 import json
@@ -340,6 +341,34 @@ def _round_display(x):
     return int(round(x / step) * step) if step >= 1 else round(x)
 
 
+_STEMS_CACHE: dict = {'mtime': None, 'stems': {}}
+
+
+def _archive_stems() -> dict[str, str]:
+    """sha1 stem → file name of everything in archive/images (re-read when the directory changes)."""
+    try:
+        m = os.stat(archive.IMG_DIR).st_mtime_ns
+    except OSError:
+        return {}
+    if _STEMS_CACHE['mtime'] != m:
+        _STEMS_CACHE['stems'] = {os.path.splitext(f)[0]: f for f in os.listdir(archive.IMG_DIR)}
+        _STEMS_CACHE['mtime'] = m
+    return _STEMS_CACHE['stems']
+
+
+def _best_image_file(l, stems: dict, srcs: dict) -> str | None:
+    """Source for the card thumbnail: the large variant of the ad's picture if archived (search cards
+    only carry a tiny one), else the archived card file."""
+    src, url = srcs.get(l['source']), l['image_url']
+    if src and url:
+        try:
+            if name := stems.get(hashlib.sha1(src.full_image_url(url).encode()).hexdigest()):
+                return name
+        except Exception:
+            pass
+    return l['image_file']
+
+
 @app.route('/', defaults={'tracker_id': None})
 @app.route('/tracker/<int:tracker_id>')
 def index(tracker_id):
@@ -356,6 +385,8 @@ def index(tracker_id):
     source_names = {s.name: s.display_name for s in sources.all_sources()}
 
     gone_cutoff = (datetime.utcnow() - timedelta(days=GONE_HIDE_DAYS)).isoformat()
+    stems = _archive_stems()
+    srcs = {s.name: s for s in sources.all_sources()}
     cards: dict[int, dict] = {}
     for l in listings:
         hist = history.get(l['id'], [])
@@ -389,7 +420,7 @@ def index(tracker_id):
             'title': l['title'] or '(untitled)',
             'location': l['location'],
             'image_url': l['image_url'],
-            'image_file': l['image_file'],
+            'image_file': _best_image_file(l, stems, srcs),
             'active': bool(l['active']),
             # gone for more than a week → hidden in tracker views unless asked for
             'stale_gone': not l['active'] and (l['last_seen'] or '') < gone_cutoff,
@@ -468,6 +499,15 @@ def index(tracker_id):
         refreshing=list(_active_refreshes),
         open_tracker=tracker_id,
     )
+
+
+@app.route('/archive/thumb/<path:name>')
+def archive_thumb(name):
+    """Card thumbnail (256 px) of an archived image; falls back to the original if none can be made."""
+    path = archive.thumbnail(name)
+    if path is None:
+        return send_from_directory(archive.IMG_DIR, name, max_age=86400)
+    return send_from_directory(archive.THUMB_DIR, os.path.basename(path), max_age=86400 * 30)
 
 
 @app.route('/archive/img/<path:name>')

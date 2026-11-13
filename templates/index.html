@@ -482,7 +482,7 @@ function galleryStep(id, dir) {
 }
 
 function listingCardHtml(c) {
-  const imgSrc = c.image_file ? '/archive/img/' + c.image_file : c.image_url;
+  const imgSrc = c.image_file ? '/archive/thumb/' + c.image_file : c.image_url;
   // large preview with gallery arrows (the photo list is loaded on first use, see galleryStep)
   const thumb = `<div class="gallery" data-id="${c.id}" data-i="0">
       ${imgSrc ? `<img src="${esc(imgSrc)}" loading="lazy" alt="">` : '<div class="noimg">kein Bild</div>'}
