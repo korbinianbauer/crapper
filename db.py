@@ -1062,6 +1062,13 @@ def get_tracker_listing_counts() -> dict[int, int]:
             'SELECT tracker_id, COUNT(*) FROM tracker_listings GROUP BY tracker_id')}
 
 
+def tracker_listing_ids(tracker_id: int) -> list[int]:
+    """All listings ever surfaced by the tracker (active or gone)."""
+    with get_db() as conn:
+        return [r[0] for r in conn.execute(
+            'SELECT listing_id FROM tracker_listings WHERE tracker_id = ?', (tracker_id,))]
+
+
 def get_tracker_memberships() -> dict[int, list[int]]:
     """tracker_id → list of its listing_ids (which trackers surfaced which listing)."""
     with get_db() as conn:

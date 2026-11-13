@@ -27,7 +27,6 @@ def _upsert(source, r, seen_at) -> int:
     if url and (fname := archive.download_image(url)):
         db.set_image_file(lid, url, fname)
     archive_full_images(source, [*r.images, r.image_url])
-    recompress_images(source, lid)
     return lid
 
 
@@ -40,6 +39,21 @@ def recompress_images(source, lid):
                     archive.recompress(name)
     except Exception:
         logger.exception('Image recompression failed for listing %s', lid)
+
+
+def recompress_trackers(trackers: list[dict]):
+    """After a poll (scheduled or manual): convert the archived images of *all* listings of the polled
+    trackers — also those that vanished from their source — to the current storage format."""
+    done: set[int] = set()
+    for tracker in trackers:
+        try:
+            source = sources.get(tracker['source'])
+        except KeyError:
+            continue
+        for lid in db.tracker_listing_ids(tracker['id']):
+            if lid not in done:
+                done.add(lid)
+                recompress_images(source, lid)
 
 
 def archive_full_images(source, urls):
@@ -301,6 +315,7 @@ def _poll(trackers: list[dict]):
         _drain(queue, started)
     except Exception as e:
         logger.error('Detail archiving failed: %s', e)
+    recompress_trackers(trackers)
     for tid, s in stats.items():
         db.record_poll_stats(tid, s['seen_at'], s['found'], s['priced'], s['rescued'])
         if s['found'] >= db.PROBLEM_MIN_ADS and s['priced'] < db.PROBLEM_RATIO * s['found']:
