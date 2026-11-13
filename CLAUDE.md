@@ -188,6 +188,22 @@ price and the ML rating (`fair_delta` = asking price vs. fair price in %, negati
   `db.save_listing_features`, then `ml.predict`. Read negations carefully ("kein Aufzug", "ohne
   Einbauküche"), ignore wish lists in Tausch ads, skip wanted ads ("Suche …"); place→km distances are
   estimated by the agent from the town.
+- **Unified model (`immobilie_v1`, `definition.unified`)**: ONE feature set / ONE model for flats AND houses, rent AND
+  sale (replaces the per-tracker sets and `wohnung_miete_gesamt_v1` / `wohnung_kaufen_v1` once trained — until then
+  those still serve; `db.get_fair_price_map` processes the unified set last so it wins). Each listing carries
+  `data["_angebot"]` = `miete`|`kauf` (+ `_cost` for rents); features are the union (see `scripts/migrate_unified_features.py`,
+  no ≤30 limit here). There are no listings with both prices, so `ml.sale_factor` takes the **average (geometric mean) ratio of
+  €/m² sale to €/m² normalised Warmmiete** (plausible listings only, ≈ 255 on the 13.11.2026 data) as synthetic ground truth: the model
+  learns the normalised-Warmmiete equivalent (sale price ÷ factor), every listing gets BOTH `fair_miete` and
+  `fair_kauf = fair_miete × factor` (`listing_predictions`). `fair_prices` stores the rent equivalent; `get_fair_price_map` /
+  `get_fair_price` multiply it by the factor for `kauf` listings, so rating code is unchanged. Plausibility windows per offer
+  (`definition.plausible`: miete 4–60, kauf 1500–15000 €/m²); `definition.exclude` (`tausch`, `wg`, `niessbrauch`) = listing is neither
+  trained on nor rated (`per_range` [0,0]). The factor is recomputed at every training and stored in the model's metrics.
+  Extraction (by the agent, never a script): save into `immobilie_v1` only, always with `_angebot`; houses add `grundstueck`
+  and a house `typ`. Migrated listings have `_todo` = new features still to read from the ad (`seelage`, `denkmal`, `niessbrauch`;
+  sale also `ausstattung`, `zustand`) — remove the keys from `_todo` when filled in. `dist_schliersee` is computed from the PLZ
+  (straight line × 1.25). Caveat: older `dist_muenchen`/`dist_tegernsee` values are inconsistent between sources (ImmoScout decimals =
+  straight line, Kleinanzeigen rounded hand estimates).
 - **Normalised rent (`_cost`)**: for rent feature sets the agent also stores, per listing, next to the features
   `data["_cost"] = {basis: "kalt"|"warm", add: €NK+Heizung on top of the price (null = unknown), incl: [strom|internet|stellplatz]
   contained in the price, extra: [heizung|wasser|muell] NOT contained, sp: separate parking price,
@@ -211,7 +227,7 @@ price and the ML rating (`fair_delta` = asking price vs. fair price in %, negati
   at read time (`db.get_fair_price_map` / `get_fair_price`); `fair_prices` always stores the raw prediction.
 - **`settings`** — `poll_cron` (default `0 4 * * *`), `search_pages`, `detail_block_<source>` (JSON
   `{delay, next}`: persistent pacing of ad-page fetches — `delay` = seconds between two requests of the source
-  (starts at its minimum, always within 1 s … 4 h; ImmoScout 10 s … 4 min, `poller.BACKOFF_PACING`), ×2 after every HTTP 403/429 (`RateLimited` from the source), ×0.5 after
+  (starts at its minimum, always within 1 s … 4 h; ImmoScout 5 s … 4 min, `poller.BACKOFF_PACING`), ×2 after every HTTP 403/429 (`RateLimited` from the source), ×0.5 after
   every successful fetch (ImmoScout: ×1.1 / ×0.98); `next` = earliest time of the next request (see Kleinanzeigen notes)).
 
 `init_db()` drops & recreates the data tables if it detects a pre-multi-source

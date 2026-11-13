@@ -364,6 +364,35 @@ def _sane(row, per, rng=None):
     return True
 
 
+def is_unified(definition: dict) -> bool:
+    """A unified feature set covers flats AND houses, rent AND sale in ONE model (see `train`)."""
+    return bool(definition.get('unified'))
+
+
+def offer_range(definition_or_metrics: dict, offer: str | None):
+    """(min, max) €/m² plausibility window for an offer type ('miete'|'kauf') of a unified set."""
+    r = (definition_or_metrics.get('plausible') or definition_or_metrics.get('ranges') or {}).get(offer)
+    return tuple(r) if r else None
+
+
+def sale_factor(rows, per, ranges) -> tuple[float, dict]:
+    """Synthetic ground truth link between sale and rent: there are no listings with both prices, so
+    the average ratio of €/m² (sale) to €/m² (normalised Warmmiete) is used. Geometric means (the model
+    works on log prices), plausible listings only. -> (factor, {n_rent, n_sale, rent_m2, sale_m2, spread})"""
+    lr, ls = [], []
+    for r in rows:
+        base = (r['features'] or {}).get(per)
+        if not base or not r['price'] or r['price'] <= 0 or not _sane({**r, 'price': r.get('raw_price', r['price'])}, per, ranges.get(r['offer'])):
+            continue
+        (ls if r['offer'] == 'kauf' else lr).append(math.log(r['price'] / base))
+    if len(lr) < 10 or len(ls) < 10:
+        raise SystemExit(f'factor needs rent AND sale listings (rent {len(lr)}, sale {len(ls)})')
+    f = math.exp(float(np.mean(ls)) - float(np.mean(lr)))
+    return f, {'n_rent': len(lr), 'n_sale': len(ls), 'rent_m2': round(math.exp(float(np.mean(lr))), 2),
+               'sale_m2': round(math.exp(float(np.mean(ls))), 1),
+               'spread': round(math.sqrt(float(np.var(ls)) + float(np.var(lr))), 3)}   # sd of log(ratio) between two random listings
+
+
 def train(feature_set_name: str, per: str | None = None, activate: bool = True) -> dict:
     import joblib
     from sklearn.model_selection import KFold, cross_val_predict
@@ -376,6 +405,12 @@ def train(feature_set_name: str, per: str | None = None, activate: bool = True) 
     pl = fs['definition'].get('plausible') or {}
     per = per or pl.get('per') or 'wohnflaeche'
     rng = (pl['min'], pl['max']) if pl.get('per') == per and 'min' in pl else None
+    unified = is_unified(fs['definition'])
+    exclude = set(fs['definition'].get('exclude') or [])           # flags that take a listing out of training/rating
+    if unified:
+        per = pl.get('per') or 'wohnflaeche'
+        ranges = {k: tuple(v) for k, v in pl.items() if k in ('miete', 'kauf')}
+        features = [f for f in features if f['key'] not in exclude]
     rows = db.get_training_rows(fs['id'])
     # rows with cost data are trained on the normalised rent (see effective_price)
     assume = db.get_cost_assumptions(fs['id']) if any(r.get('cost') for r in rows) else None
@@ -384,13 +419,27 @@ def train(feature_set_name: str, per: str | None = None, activate: bool = True) 
         r['raw_price'] = r['price']
         r['price'] = (effective_price(r['price'], r.get('cost'), r['features'], assume, cmodels)
                       if r['price'] else r['price'])
-    train_rows = [r for r in rows if _sane({**r, 'price': r['raw_price']}, per, rng)]
+    factor = fstats = None
+    if unified:
+        for r in rows:
+            if r['offer'] not in ('miete', 'kauf'):
+                raise SystemExit(f'listing {r["listing_id"]} has no _angebot (miete|kauf)')
+        usable = [r for r in rows if not any(r['features'].get(k) for k in exclude)]
+        # factor from the normalised rents and the asking prices of the plausible listings
+        factor, fstats = sale_factor(usable, per, ranges)
+        train_rows = [r for r in usable if _sane({**r, 'price': r['raw_price']}, per, ranges[r['offer']])]
+        for r in train_rows:          # rent equivalent: a sale price is divided by the factor
+            r['target'] = r['price'] / factor if r['offer'] == 'kauf' else r['price']
+    else:
+        train_rows = [r for r in rows if _sane({**r, 'price': r['raw_price']}, per, rng)]
+        for r in train_rows:
+            r['target'] = r['price']
     if len(train_rows) < MIN_TRAIN:
         raise SystemExit(f'only {len(train_rows)} usable priced listings (<{MIN_TRAIN})')
 
     enc = Encoder(features).fit([r['features'] for r in train_rows])
     X = enc.transform([r['features'] for r in train_rows])
-    y = np.log([r['price'] for r in train_rows])
+    y = np.log([r['target'] for r in train_rows])
     prices = np.exp(y)
 
     # Model selection: 5-fold CV, 3 repeats; score = mean abs error in € on out-of-fold preds.
@@ -419,16 +468,34 @@ def train(feature_set_name: str, per: str | None = None, activate: bool = True) 
             np.exp(model.predict(enc.transform([r['features']]))[0]))
 
     imp = _importances(model, best, X, y, enc.names)
+    by_offer = None
+    if unified:      # error per offer type in its own unit (€/month resp. € purchase price) from the out-of-fold predictions
+        by_offer = {}
+        for off, mult in (('miete', 1.0), ('kauf', factor)):
+            idx = [i for i, r in enumerate(train_rows) if r['offer'] == off]
+            if idx:
+                err = np.abs(oofs[best][idx] - prices[idx])
+                by_offer[off] = {'n': len(idx), 'mae': round(float(np.mean(err)) * mult, 1),
+                                 'median_ape': round(float(np.median(err / prices[idx])), 4)}
     metrics = {'chosen': best, 'per': per, 'per_range': rng, 'cost_assumptions': assume,
                'cost_models': {k: ({'n': v['n'], 'mae': v['mae'], 'algo': v['algo']} if v else None)
                                for k, v in (cmodels or {}).items()}, 'candidates': scores, 'n_features': len(enc.names),
                'n_excluded': len(rows) - len(train_rows), 'importance': imp}
+    if unified:
+        metrics.update({'unified': True, 'factor': round(factor, 3), 'factor_stats': fstats,
+                        'ranges': {k: list(v) for k, v in ranges.items()}, 'exclude': sorted(exclude),
+                        'by_offer': by_offer})
     buf = io.BytesIO()
     joblib.dump({'encoder': enc, 'model': model, 'algo': best, 'cost_models': cmodels}, buf)
     mid = db.save_model(fs['id'], best, len(train_rows), metrics, buf.getvalue(), preds, activate)
     metrics['model_id'] = mid
     refresh_predictions(fs['id'])            # results of the (possibly new) active model
     print(f'model {mid}: {best}  n={len(train_rows)} (excluded {len(rows) - len(train_rows)})')
+    if unified:
+        print(f'  Faktor Kauf/Miete (Ø €/m², normiert): {factor:.1f}  ({fstats["sale_m2"]} €/m² Kauf / {fstats["rent_m2"]} €/m² Miete, '
+              f'n={fstats["n_sale"]}/{fstats["n_rent"]})')
+        for off, v in (by_offer or {}).items():
+            print(f'  {off:6} n={v["n"]:4}  MAE {v["mae"]:9.1f} €  median |err| {v["median_ape"]*100:4.1f} %')
     for n, s in scores.items():
         print(f'  {n:18} MAE {s["mae"]:7.1f} €  median |err| {s["median_ape"]*100:4.1f} %  R² {s["r2"]:.3f}'
               + ('  <- chosen' if n == best else ''))
@@ -487,10 +554,12 @@ def predict(feature_set_name: str, listing_ids=None, model_id: int | None = None
     return len(todo)
 
 
-def listing_results(fair_raw, cost, features, assume, cmodels, impacts=None):
+def listing_results(fair_raw, cost, features, assume, cmodels, impacts=None, factor=None):
     """Everything the active model (incl. its cost sub-models) predicts for one listing — stored in
     `listing_predictions` and shown on the archive page."""
     out = {'fair_price': round(fair_raw, 2)}
+    if factor:       # unified model: every listing gets BOTH a rent and a purchase price (fair_raw = normalised Warmmiete)
+        out.update({'fair_miete': round(fair_raw, 2), 'fair_kauf': round(fair_raw * factor, 2), 'factor': factor})
     if impacts:      # effect of each feature value, as fraction of the model's own prediction
         out['impacts'] = impacts
     if cost is None or not assume:
@@ -531,7 +600,8 @@ def refresh_predictions(feature_set_id: int, listing_ids=None) -> int:
         except Exception as e:
             print(f'feature_impacts failed for listing {r["listing_id"]}: {e}')
             return None
-    rows = {r['listing_id']: listing_results(fair[r['listing_id']], r.get('cost'), r['features'], assume, cm, impacts(r))
+    rows = {r['listing_id']: listing_results(fair[r['listing_id']], r.get('cost'), r['features'], assume, cm, impacts(r),
+                                            metrics.get('factor'))
             for r in db.get_training_rows(feature_set_id)
             if r['listing_id'] in fair and (wanted is None or r['listing_id'] in wanted)}
     db.save_listing_predictions(feature_set_id, mid, rows, replace_all=wanted is None)

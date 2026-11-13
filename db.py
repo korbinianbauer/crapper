@@ -711,6 +711,7 @@ def get_training_rows(feature_set_id: int) -> list[dict]:
     for r in rows:
         data = json.loads(r['data'])
         out.append({'listing_id': r['listing_id'], 'price': r['price'], 'cost': data.get('_cost'),
+                    'offer': data.get('_angebot'),        # 'miete' | 'kauf' (unified feature sets only)
                     'features': {k: v for k, v in data.items() if not k.startswith('_')}})
     return out
 
@@ -918,12 +919,34 @@ def active_model_id(feature_set_id: int) -> int | None:
         return _active_model_id(conn, feature_set_id)
 
 
+def _unified_view(met: dict, offer: str | None, features: dict):
+    """(factor, per_range) of one listing under a unified model (`ml.train`): the model predicts the
+    normalised Warmmiete; a sale listing is compared with it × factor. Listings flagged by `exclude`
+    (Tausch, WG, Nießbrauch) get an empty window = never plausible, so they are not rated."""
+    if not met.get('unified'):
+        return 1.0, met.get('per_range')
+    if any(features.get(k) for k in met.get('exclude') or []):
+        return (met['factor'] if offer == 'kauf' else 1.0), [0, 0]
+    return (met['factor'] if offer == 'kauf' else 1.0), (met.get('ranges') or {}).get(offer)
+
+
+def _is_unified_def(definition_json: str) -> bool:
+    try:
+        return bool(json.loads(definition_json).get('unified'))
+    except ValueError:
+        return False
+
+
 def get_fair_price_map() -> dict[int, dict]:
     """{listing_id: {fair_price, raw, features, per}} from each feature set's active model.
-    `fair_price` includes the manual offset, `raw` is the pure ML prediction."""
+    `fair_price` includes the manual offset, `raw` is the pure ML prediction. Under a unified model
+    (rent + sale) both are in the unit of the listing's own offer (sale listings: × the Kauf/Miete factor).
+    The unified set is processed last, so it wins over older per-tracker sets for the same listing."""
     out = {}
     with get_db() as conn:
-        for fs in conn.execute('SELECT id FROM feature_sets').fetchall():
+        sets = sorted(conn.execute('SELECT id, definition FROM feature_sets').fetchall(),
+                      key=lambda fs: _is_unified_def(fs['definition']))
+        for fs in sets:
             mid = _active_model_id(conn, fs['id'])
             if not mid:
                 continue
@@ -937,11 +960,13 @@ def get_fair_price_map() -> dict[int, dict]:
                     WHERE m.id = ?''', (mid,)):
                 data = json.loads(r['data']) if r['data'] else {}
                 met = json.loads(r['metrics'])
-                out[r['listing_id']] = {'fair_price': r['fair_price'] * factor, 'raw': r['fair_price'],
-                                        'features': {k: v for k, v in data.items() if not k.startswith('_')},
+                feats = {k: v for k, v in data.items() if not k.startswith('_')}
+                ufac, rng = _unified_view(met, data.get('_angebot'), feats)
+                out[r['listing_id']] = {'fair_price': r['fair_price'] * ufac * factor, 'raw': r['fair_price'] * ufac,
+                                        'features': feats, 'offer': data.get('_angebot'),
                                         'cost': data.get('_cost'), 'assume': met.get('cost_assumptions'),
                                         'model_id': r['model_id'], 'trained_at': r['trained_at'],
-                                        'per': met.get('per'), 'per_range': met.get('per_range')}
+                                        'per': met.get('per'), 'per_range': rng}
     return out
 
 
@@ -957,6 +982,7 @@ def get_fair_price(listing_id: int) -> dict | None:
             LEFT JOIN listing_features lf ON lf.listing_id = fp.listing_id
                                          AND lf.feature_set_id = fs.id
             WHERE fp.listing_id = ?''', (listing_id,)).fetchall()
+        rows = sorted(rows, key=lambda x: not _is_unified_def(x['definition']))     # unified set first
         r = next((x for x in rows if x['model_id'] == _active_model_id(conn, x['fs_id'])), None)
         offset = _fair_offset(conn, r['fs_id']) if r else 0.0
     if not r:
@@ -966,8 +992,12 @@ def get_fair_price(listing_id: int) -> dict | None:
     data = json.loads(d['features']) if d['features'] else {}
     d['features'] = {k: v for k, v in data.items() if not k.startswith('_')}
     d['cost'] = data.get('_cost')
+    d['offer'] = data.get('_angebot')
     d['definition'] = json.loads(d['definition'])
-    d['raw'] = d['fair_price']
+    ufac, rng = _unified_view(d['metrics'], d['offer'], d['features'])
+    d['unified_factor'] = d['metrics'].get('factor') if d['metrics'].get('unified') else None
+    d['per_range'] = rng
+    d['raw'] = d['fair_price'] * ufac
     d['offset'] = offset
     d['fair_price'] = d['raw'] * (1 + offset / 100)
     return d

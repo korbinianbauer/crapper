@@ -118,7 +118,7 @@ BACKOFF_MAX = timedelta(hours=4)
 BACKOFF_GROWTH = 2.0
 BACKOFF_DECAY = 0.5
 # source → (min, max, growth per 403/429, decay per success)
-BACKOFF_PACING = {'immoscout': (timedelta(seconds=10), timedelta(minutes=4), 1.10, 0.98)}
+BACKOFF_PACING = {'immoscout': (timedelta(seconds=5), timedelta(minutes=4), 1.10, 0.98)}
 LIMITED_TO_BACK = 3                      # an ad blocked this often in one poll is retried last
 MAX_POLL_WAIT = timedelta(hours=4)       # a poll gives up on items not due within this of its start
 IN_FLIGHT = timedelta(minutes=2)         # slot reserved for a running request (crash safety)

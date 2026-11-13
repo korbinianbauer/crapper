@@ -625,7 +625,7 @@ def _fair_info(listing_id, prices):
         return None
     cur_price = next((p['price'] for p in reversed(prices) if p['price'] is not None), None)
     fair['current'] = cur_price
-    fair['plausible'] = ml.is_plausible(cur_price, fair['features'], fair['metrics'].get('per'), fair['metrics'].get('per_range'))
+    fair['plausible'] = ml.is_plausible(cur_price, fair['features'], fair['metrics'].get('per'), fair['per_range'])
     fair['eff'], fair['eff_parts'] = ml.effective_breakdown(cur_price, fair.get('cost'), fair['features'],
                                                            fair['metrics'].get('cost_assumptions'),
                                                            ml.cost_models_for(fair['model_id']))
@@ -689,6 +689,10 @@ def _predicted_facts(listing_id, fair):
     d, rent = p['data'], fair.get('cost') is not None
     out = [('Angemessene normierte Warmmiete' if rent else 'Angemessener Preis', _num(d['fair_price']) + ' €',
             'Modellwert ohne Offset' if fair.get('offset') else '')]
+    if 'fair_kauf' in d:      # unified model: one prediction, both prices (Kauf = Miete × Faktor, see ml.sale_factor)
+        out = [('Angemessene normierte Warmmiete', _num(d['fair_miete']) + ' €/Monat', 'Modellwert ohne Offset'),
+               ('Angemessener Kaufpreis', _num(d['fair_kauf']) + ' €',
+                f"Miete × Faktor {_num(d['factor'], 1)} (Ø Kaufpreis/Miete pro m²)")]
     if 'heat_kwh_m2' in d:
         used = d.get('heat_used') != 'anzeige'
         out.append(('Energiebedarf (kWh/m²·a)', _num(d['heat_kwh_m2']),
@@ -1028,7 +1032,7 @@ def _fair_stats(fs: dict, fair_map: dict) -> dict:
     m0 = fs['models'][0]['metrics'] if fs['models'] else {}
     for r in db.get_training_rows(fs['id']):
         f = fair_map.get(r['listing_id'])
-        if f and r['price'] and ml.is_plausible(r['price'], r['features'], m0.get('per'), m0.get('per_range')):
+        if f and r['price'] and ml.is_plausible(r['price'], r['features'], m0.get('per'), f.get('per_range')):
             ratios.append(ml.effective_price(r['price'], r.get('cost'), r['features'], f.get('assume'),
                                              ml.cost_models_for(f.get('model_id'))) / f['raw'])
     if not ratios:
