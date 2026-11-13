@@ -222,6 +222,7 @@ def init_db():
             SELECT id, 1, last_seen, title, location, image_url, '[]', 'legacy'
               FROM listings l
              WHERE NOT EXISTS (SELECT 1 FROM listing_versions v WHERE v.listing_id = l.id)''')
+        conn.execute('CREATE TABLE IF NOT EXISTS image_checked (file TEXT PRIMARY KEY)')
         _prune_phantom_versions(conn)
         _init_default_settings(conn)
 
@@ -576,6 +577,39 @@ def set_image_file(listing_id: int, image_url: str, image_file: str):
             '''UPDATE listing_versions SET image_file = ?
                WHERE image_url = ? AND listing_id = ? AND image_file IS NULL''',
             (image_file, image_url, listing_id))
+
+
+def is_image_checked(name: str) -> bool:
+    with get_db() as conn:
+        return conn.execute('SELECT 1 FROM image_checked WHERE file = ?', (name,)).fetchone() is not None
+
+
+def mark_image_checked(name: str):
+    with get_db() as conn:
+        conn.execute('INSERT OR IGNORE INTO image_checked (file) VALUES (?)', (name,))
+
+
+def rename_image_file(old: str, new: str):
+    """An archived image file was converted: repoint all references."""
+    with get_db() as conn:
+        conn.execute('UPDATE listings SET image_file = ? WHERE image_file = ?', (new, old))
+        conn.execute('UPDATE listing_versions SET image_file = ? WHERE image_file = ?', (new, old))
+
+
+def listing_image_urls(listing_id: int) -> list[str]:
+    """Every image URL the listing ever had (current + all archived versions)."""
+    urls: dict[str, None] = {}
+    with get_db() as conn:
+        for (u,) in conn.execute('SELECT image_url FROM listings WHERE id = ?', (listing_id,)):
+            urls[u] = None
+        for u, imgs in conn.execute('SELECT image_url, images FROM listing_versions WHERE listing_id = ?',
+                                    (listing_id,)):
+            urls[u] = None
+            try:
+                urls.update(dict.fromkeys(json.loads(imgs) if imgs else []))
+            except ValueError:
+                pass
+    return [u for u in urls if u]
 
 
 def get_versions(listing_id: int) -> list[dict]:

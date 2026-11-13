@@ -27,7 +27,19 @@ def _upsert(source, r, seen_at) -> int:
     if url and (fname := archive.download_image(url)):
         db.set_image_file(lid, url, fname)
     archive_full_images(source, [*r.images, r.image_url])
+    recompress_images(source, lid)
     return lid
+
+
+def recompress_images(source, lid):
+    """Convert the listing's already archived images to the current storage format (once per file)."""
+    try:
+        for u in db.listing_image_urls(lid):
+            for url in dict.fromkeys([source.full_image_url(u), u]):
+                if name := archive.local_name(url):
+                    archive.recompress(name)
+    except Exception:
+        logger.exception('Image recompression failed for listing %s', lid)
 
 
 def archive_full_images(source, urls):

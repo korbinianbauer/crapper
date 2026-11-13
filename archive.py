@@ -1,14 +1,51 @@
 """Local archive of listing images (ad images vanish when the ad is removed)."""
 import hashlib
+import io
 import logging
 import os
 
 import requests
 
+import db
+
+try:
+    from PIL import Image, ImageOps
+except ImportError:                     # without Pillow images are stored unchanged
+    Image = None
+
 logger = logging.getLogger(__name__)
 
 IMG_DIR = os.path.join(os.path.dirname(__file__), 'archive', 'images')
+JPEG_QUALITY = 85
 _TYPES = {'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif'}
+
+
+def _has_transparency(im) -> bool:
+    if im.mode in ('RGBA', 'LA', 'PA') or (im.mode == 'P' and 'transparency' in im.info):
+        return im.convert('RGBA').getchannel('A').getextrema()[0] < 255
+    return False
+
+
+def _to_jpeg(data: bytes, ctype: str) -> tuple[bytes, str]:
+    """Re-encode *data* as JPEG (quality 85) with EXIF orientation applied. GIFs and images that really
+    use transparency stay untouched; a JPEG that does not get smaller (or an undecodable image) too."""
+    if Image is None or ctype == 'image/gif':
+        return data, ctype
+    try:
+        src = Image.open(io.BytesIO(data))
+        if _has_transparency(src):
+            return data, ctype
+        im = ImageOps.exif_transpose(src)
+        if im.mode != 'RGB':
+            im = im.convert('RGB')
+        out = io.BytesIO()
+        im.save(out, 'JPEG', quality=JPEG_QUALITY, optimize=True)
+    except Exception as e:
+        logger.warning('Image re-encode failed: %s', e)
+        return data, ctype
+    if out.tell() >= len(data):                 # e.g. flat graphics: keep the smaller original
+        return data, ctype
+    return out.getvalue(), 'image/jpeg'
 
 
 def download_image(url: str) -> str | None:
@@ -27,9 +64,11 @@ def download_image(url: str) -> str | None:
     except Exception as e:
         logger.warning('Image download failed %s: %s', url, e)
         return None
+    data, ctype = _to_jpeg(r.content, ctype)
     name = key + _TYPES[ctype]
     with open(os.path.join(IMG_DIR, name), 'wb') as f:
-        f.write(r.content)
+        f.write(data)
+    db.mark_image_checked(name)                 # already processed, never re-encode it again
     return name
 
 
@@ -40,3 +79,43 @@ def local_name(url: str) -> str | None:
         if os.path.exists(os.path.join(IMG_DIR, key + ext)):
             return key + ext
     return None
+
+
+_EXT_TYPES = {v: k for k, v in _TYPES.items()}
+
+
+def recompress(name: str) -> str:
+    """Bring an already archived image to the current storage format (see `_to_jpeg`) and return its
+    (possibly new) file name. A converted PNG/WebP becomes `<key>.jpg`; the DB references are updated
+    before the old file is removed. Every file is processed once (`db.image_checked`)."""
+    if not name or db.is_image_checked(name):
+        return name
+    path = os.path.join(IMG_DIR, name)
+    key, ext = os.path.splitext(name)
+    try:
+        with open(path, 'rb') as f:
+            data = f.read()
+    except OSError:
+        return name
+    new_data, ctype = _to_jpeg(data, _EXT_TYPES.get(ext, 'image/jpeg'))
+    if new_data is data:                        # nothing to gain / must stay as is
+        db.mark_image_checked(name)
+        return name
+    new_name = key + '.jpg'
+    new_path = os.path.join(IMG_DIR, new_name)
+    if new_name != name and os.path.exists(new_path):   # a jpg of this URL already exists: leave it
+        db.mark_image_checked(name)
+        return name
+    tmp = f'{new_path}.{os.getpid()}.tmp'
+    with open(tmp, 'wb') as f:
+        f.write(new_data)
+    os.replace(tmp, new_path)
+    db.mark_image_checked(new_name)
+    if new_name != name:
+        db.rename_image_file(name, new_name)
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    logger.info('Image %s: %d → %d bytes', new_name, len(data), len(new_data))
+    return new_name
