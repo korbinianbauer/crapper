@@ -111,9 +111,11 @@ DETAIL_INTERVAL = timedelta(hours=20)    # "at least daily" with slack for poll 
 
 # Ad-page fetches of a source are paced by one persistent interval: the time between
 # two requests. It doubles after every 403/429 and halves after every
-# successful fetch, always staying within BACKOFF_MIN … BACKOFF_MAX.
-BACKOFF_MIN = timedelta(seconds=1)       # also the start value
+# successful fetch, always staying within the source's (min, max) — the min is also the
+# start value. Default 1 s … 4 h; per-source overrides in BACKOFF_LIMITS.
+BACKOFF_MIN = timedelta(seconds=1)
 BACKOFF_MAX = timedelta(hours=4)
+BACKOFF_LIMITS = {'immoscout': (timedelta(seconds=10), timedelta(minutes=4))}
 BACKOFF_GROWTH = 2.0
 BACKOFF_DECAY = 0.5
 LIMITED_TO_BACK = 3                      # an ad blocked this often in one poll is retried last
@@ -125,25 +127,30 @@ IN_FLIGHT = timedelta(minutes=2)         # slot reserved for a running request (
 # share one interval per source and never send at the same time.
 
 
+def _limits(source) -> tuple[float, float]:
+    lo, hi = BACKOFF_LIMITS.get(source.name, (BACKOFF_MIN, BACKOFF_MAX))
+    return lo.total_seconds(), hi.total_seconds()
+
+
 def _block_key(source) -> str:
     return f'detail_block_{source.name}'
 
 
-def _parse_pace(raw: str) -> dict:
+def _parse_pace(raw: str, lo: float = BACKOFF_MIN.total_seconds()) -> dict:
     """{'delay': interval in s, 'next': ISO time the next request may go out (or None)}.
     Defaults for a source with no history."""
     try:
         st = json.loads(raw or 'null') or {}
-        delay = float(st['delay']) if 'delay' in st else BACKOFF_MIN.total_seconds()
+        delay = float(st['delay']) if 'delay' in st else lo
         nxt = st.get('next') or st.get('until')          # 'until': pre-interval format
         datetime.fromisoformat(nxt) if nxt else None
         return {'delay': delay, 'next': nxt}
     except (ValueError, TypeError, AttributeError):
-        return {'delay': BACKOFF_MIN.total_seconds(), 'next': None}
+        return {'delay': lo, 'next': None}
 
 
 def _pace_state(source) -> dict:
-    return _parse_pace(db.get_setting(_block_key(source), ''))
+    return _parse_pace(db.get_setting(_block_key(source), ''), _limits(source)[0])
 
 
 def _ready_at(source) -> datetime:
@@ -157,7 +164,7 @@ def _reserve(source) -> bool:
     (another poll got it first). The slot is held IN_FLIGHT until the request's
     outcome reschedules it (`_pace`)."""
     def fn(raw):
-        st = _parse_pace(raw)
+        st = _parse_pace(raw, _limits(source)[0])
         now = datetime.utcnow()
         if st['next'] and datetime.fromisoformat(st['next']) > now:
             return None, False
@@ -168,10 +175,11 @@ def _reserve(source) -> bool:
 
 def _pace(source, factor: float) -> dict:
     """Scale the interval by *factor* (clamped) and schedule the next request."""
+    lo, hi = _limits(source)
+
     def fn(raw):
-        st = _parse_pace(raw)
-        st['delay'] = min(max(st['delay'] * factor, BACKOFF_MIN.total_seconds()),
-                          BACKOFF_MAX.total_seconds())
+        st = _parse_pace(raw, lo)
+        st['delay'] = min(max(st['delay'] * factor, lo), hi)
         st['next'] = (datetime.utcnow() + timedelta(seconds=st['delay'])).isoformat()
         return json.dumps(st), st
     return db.update_setting_atomic(_block_key(source), fn)
