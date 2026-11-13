@@ -400,7 +400,7 @@ function renderIndexChart(el, tr) {
   const hi = hiI;
   const pad = Math.max((hi - lo) * 0.08, 1);
   const r1 = [lo - pad, hi + pad];
-  const color = (idxVals[idxVals.length - 1] || 100) >= 100 ? '#22c55e' : '#3b82f6';
+  const color = '#3b82f6';   // matches the legend
   Plotly.newPlot(el, [{
     x: xs, y: idx, type: 'scatter', mode: 'lines', name: 'Index', connectgaps: false,
     line: {color: color, width: 2, shape: 'hv'},
