@@ -26,7 +26,8 @@ _API = 'https://api.mobile.immobilienscout24.de'
 _API_HEADERS = {'User-Agent': 'ImmoScout24_1410_30_._', 'Accept': 'application/json'}
 _TIMEOUT = 25
 _PAGE_SIZE = 20
-SEARCH_RETRIES = 8           # tries per search page while the API answers 403/429
+SEARCH_MAX_WAIT = 3 * 3600  # s: a search page is retried this long while the API answers 403/429 (the shared
+                            # interval widens with every block up to its maximum), only then the search counts as incomplete
 _EXPOSE_ID_RE = re.compile(r'/expose/(\d+)')
 _REMOVED_STATES = {'deactivated', 'expired', 'inactive', 'tobedeleted', 'archived', 'deleted'}
 
@@ -233,19 +234,27 @@ class ImmoScoutSource(Source):
     # ── search ───────────────────────────────────────────────────────────────
     def _api_get(self, parsed: dict, page: int, pace=None) -> dict | None:
         """One search page. With *pace* every request waits for the source's shared
-        interval; a 403/429 widens it and the same page is retried (SEARCH_RETRIES)."""
+        interval; a 403/429 widens it and the same page is retried until the block is over
+        (at most SEARCH_MAX_WAIT)."""
         url = (f'{_API}/search?{parsed["query"]}&realestatetype={parsed["type"]}'
                f'&pagesize={_PAGE_SIZE}&pagenumber={page}')
-        for attempt in range(SEARCH_RETRIES if pace else 1):
+        deadline = time.monotonic() + SEARCH_MAX_WAIT
+        attempt = 0
+        while True:
+            attempt += 1
             if pace:
                 pace.before()
             try:
                 resp = requests.get(url, headers=_API_HEADERS, timeout=_TIMEOUT)
                 if resp.status_code in (403, 429) and pace:
                     pace.blocked()
-                    logger.warning('IS24 search p%d HTTP %d — retrying (%d/%d)', page,
-                                   resp.status_code, attempt + 1, SEARCH_RETRIES)
-                    continue
+                    if time.monotonic() < deadline:
+                        logger.warning('IS24 search p%d HTTP %d — waiting for the block to end (try %d)',
+                                       page, resp.status_code, attempt)
+                        continue
+                    logger.error('IS24 API failed (p%d): still blocked after %d min',
+                                 page, SEARCH_MAX_WAIT // 60)
+                    return None
                 resp.raise_for_status()
                 data = resp.json()
                 if pace:
@@ -256,8 +265,6 @@ class ImmoScoutSource(Source):
                     pace.failed()
                 logger.error('IS24 API failed (p%d): %s', page, e)
                 return None
-        logger.error('IS24 API failed (p%d): still blocked after %d tries', page, SEARCH_RETRIES)
-        return None
 
     def describe_search(self, url: str) -> tuple[int | None, str]:
         parsed = self._parse_search_url(url)

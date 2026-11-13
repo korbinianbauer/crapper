@@ -272,7 +272,7 @@ schema (no `trackers.source` column). No backward compatibility is maintained.
   Price rescue for search cards without a price
   (`poll_stats.rescued`) happens in phase 2. Both sources raise `RateLimited` on
   HTTP 403/429 from ad pages. ImmoScout's search pages (`Source.paced_search`, `poller._SearchPace`) use the same
-  pace state: every page waits for the interval, a 403/429 widens it and retries the page (8×) before the search counts as incomplete.
+  pace state: every page waits for the interval, a 403/429 widens it and the page is retried until the block ends (at most `SEARCH_MAX_WAIT` = 3 h, then the search counts as incomplete).
 
 ### ImmoScout24
 - Locations: `GET https://www.immobilienscout24.de/geoautocomplete/v3/locations.json?i=…`
