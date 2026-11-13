@@ -22,6 +22,34 @@ MAX_EDGE = 2000                 # px; larger photos are scaled down (aspect rati
 _TYPES = {'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif'}
 
 
+_REF_TABLES: list | None = None
+
+
+def _ref_tables() -> list:
+    """Quantisation tables (luminance, chrominance) of our own output quality."""
+    global _REF_TABLES
+    if _REF_TABLES is None:
+        out = io.BytesIO()
+        Image.new('RGB', (16, 16)).save(out, 'JPEG', quality=JPEG_QUALITY)
+        q = Image.open(io.BytesIO(out.getvalue())).quantization
+        _REF_TABLES = [list(q[i]) for i in sorted(q)]
+    return _REF_TABLES
+
+
+def _already_small_enough(src) -> bool:
+    """A JPEG whose quantisation is at least as coarse as ours (quality <= JPEG_QUALITY, in every
+    coefficient), within MAX_EDGE and upright: re-encoding cannot help, so it is kept as is."""
+    if src.format != 'JPEG' or max(src.size) > MAX_EDGE:
+        return False
+    if src.getexif().get(0x0112, 1) != 1:
+        return False
+    tabs = getattr(src, 'quantization', None)
+    if not tabs:
+        return False
+    return all(i in tabs and all(a >= b for a, b in zip(tabs[i], ref))
+               for i, ref in enumerate(_ref_tables()))
+
+
 def _has_transparency(im) -> bool:
     if im.mode in ('RGBA', 'LA', 'PA') or (im.mode == 'P' and 'transparency' in im.info):
         return im.convert('RGBA').getchannel('A').getextrema()[0] < 255
@@ -35,7 +63,7 @@ def _to_jpeg(data: bytes, ctype: str) -> tuple[bytes, str]:
         return data, ctype
     try:
         src = Image.open(io.BytesIO(data))
-        if _has_transparency(src):
+        if _has_transparency(src) or _already_small_enough(src):
             return data, ctype
         im = ImageOps.exif_transpose(src)
         if im.mode != 'RGB':
@@ -134,3 +162,4 @@ def recompress(name: str) -> str:
             pass
     logger.info('Image %s: %d → %d bytes', new_name, len(data), len(new_data))
     return new_name
+
