@@ -3,6 +3,7 @@ import hashlib
 import io
 import logging
 import os
+import threading
 
 import requests
 
@@ -120,7 +121,7 @@ def recompress(name: str) -> str:
     if new_name != name and os.path.exists(new_path):   # a jpg of this URL already exists: leave it
         db.mark_image_checked(name)
         return name
-    tmp = f'{new_path}.{os.getpid()}.tmp'
+    tmp = f'{new_path}.{os.getpid()}.{threading.get_ident()}.tmp'
     with open(tmp, 'wb') as f:
         f.write(new_data)
     os.replace(tmp, new_path)

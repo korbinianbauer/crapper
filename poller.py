@@ -41,9 +41,10 @@ def recompress_images(source, lid):
         logger.exception('Image recompression failed for listing %s', lid)
 
 
-def recompress_trackers(trackers: list[dict]):
-    """After a poll (scheduled or manual): convert the archived images of *all* listings of the polled
-    trackers — also those that vanished from their source — to the current storage format."""
+def recompress_work(trackers: list[dict]):
+    """Generator: convert the archived images of *all* listings of the polled trackers — also those that
+    vanished from their source — to the current storage format, one listing per step. Driven by `_drain`
+    while it waits out a rate limit, and to the end after the poll."""
     done: set[int] = set()
     for tracker in trackers:
         try:
@@ -54,6 +55,7 @@ def recompress_trackers(trackers: list[dict]):
             if lid not in done:
                 done.add(lid)
                 recompress_images(source, lid)
+                yield
 
 
 def archive_full_images(source, urls):
@@ -207,13 +209,17 @@ def _detail_item(job: _DetailJob, stats: dict):
             stats[tid]['rescued'] += 1
 
 
-def _drain(queue: list, started: datetime):
+_DONE = object()
+
+
+def _drain(queue: list, started: datetime, idle=None):
     """Work through *queue* (list of (source, label, fn)) in order, each source at its
     own pace (`_ready_at`): the next item is the first one whose source may send
     again; if none may, sleep until the earliest does. A rate-limited item stays in
     place (retried first); after LIMITED_TO_BACK blocks in this poll it moves to the
     end, in case the ad itself, not our pace, triggers them. Items whose source is not ready within MAX_POLL_WAIT of the poll's start
-    are left for the next poll (where they come first, as least recently attempted)."""
+    are left for the next poll (where they come first, as least recently attempted).
+    While waiting, *idle* (an iterator of small work steps) is advanced instead of sleeping."""
     queue = list(queue)
     limited: dict[int, int] = {}
     logged_wait = None
@@ -235,6 +241,8 @@ def _drain(queue: list, started: datetime):
                             timedelta(seconds=round(wait)), len(queue))
             # Re-check at least every second: a slot held IN_FLIGHT by another poll
             # is released as soon as its request is done.
+            if idle is not None and next(idle, _DONE) is not _DONE:
+                continue                  # used the wait for one step of useful work
             time.sleep(min(wait, 1.0))
             continue
         if not _reserve(queue[idx][0]):
@@ -296,6 +304,7 @@ def _poll(trackers: list[dict]):
         except Exception as e:
             logger.error('Poll failed for tracker %d: %s', tracker['id'], e)
 
+    work = recompress_work(trackers)           # image conversion runs in the rate-limit waits
     ads = db.listing_tracker_ads(t['id'] for t, _ in singles)
     singles.sort(key=lambda ts: (ads.get(ts[0]['id'], (0, None))[1] is not None,
                                  ads.get(ts[0]['id'], (0, None))[1] or ''))
@@ -312,10 +321,11 @@ def _poll(trackers: list[dict]):
         queue += [(jobs[lid].source, f'Detail fetch of listing {lid}',
                    lambda job=jobs[lid]: _detail_item(job, stats))
                   for lid in due]
-        _drain(queue, started)
+        _drain(queue, started, work)
     except Exception as e:
         logger.error('Detail archiving failed: %s', e)
-    recompress_trackers(trackers)
+    for _ in work:                             # whatever the waits did not cover
+        pass
     for tid, s in stats.items():
         db.record_poll_stats(tid, s['seen_at'], s['found'], s['priced'], s['rescued'])
         if s['found'] >= db.PROBLEM_MIN_ADS and s['priced'] < db.PROBLEM_RATIO * s['found']:
