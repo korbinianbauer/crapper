@@ -57,6 +57,7 @@ class Source(ABC):
     and implement URL recognition + fetching, then register in __init__.py."""
 
     name: str                  # stable slug + DB key, e.g. 'kleinanzeigen'
+    paced_search = False       # True → fetch_search takes a `pace` object (before/ok/blocked) and uses the source's shared request pacing
     archive_details = False    # True → search hits get their full ad page fetched + archived daily
     display_name: str          # shown in the UI, e.g. 'Kleinanzeigen'
 

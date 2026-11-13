@@ -26,6 +26,7 @@ _API = 'https://api.mobile.immobilienscout24.de'
 _API_HEADERS = {'User-Agent': 'ImmoScout24_1410_30_._', 'Accept': 'application/json'}
 _TIMEOUT = 25
 _PAGE_SIZE = 20
+SEARCH_RETRIES = 8           # tries per search page while the API answers 403/429
 _EXPOSE_ID_RE = re.compile(r'/expose/(\d+)')
 _REMOVED_STATES = {'deactivated', 'expired', 'inactive', 'tobedeleted', 'archived', 'deleted'}
 
@@ -66,6 +67,7 @@ class ImmoScoutSource(Source):
     name = 'immoscout'
     display_name = 'ImmoScout24'
     archive_details = True
+    paced_search = True
 
     def full_image_url(self, url: str) -> str:
         # ".../<id>.jpg/ORIG/resize/WxH/format/webp/quality/80" is a downscaled, lossy
@@ -229,16 +231,33 @@ class ImmoScoutSource(Source):
         )
 
     # ── search ───────────────────────────────────────────────────────────────
-    def _api_get(self, parsed: dict, page: int) -> dict | None:
+    def _api_get(self, parsed: dict, page: int, pace=None) -> dict | None:
+        """One search page. With *pace* every request waits for the source's shared
+        interval; a 403/429 widens it and the same page is retried (SEARCH_RETRIES)."""
         url = (f'{_API}/search?{parsed["query"]}&realestatetype={parsed["type"]}'
                f'&pagesize={_PAGE_SIZE}&pagenumber={page}')
-        try:
-            resp = requests.get(url, headers=_API_HEADERS, timeout=_TIMEOUT)
-            resp.raise_for_status()
-            return resp.json()
-        except Exception as e:
-            logger.error('IS24 API failed (p%d): %s', page, e)
-            return None
+        for attempt in range(SEARCH_RETRIES if pace else 1):
+            if pace:
+                pace.before()
+            try:
+                resp = requests.get(url, headers=_API_HEADERS, timeout=_TIMEOUT)
+                if resp.status_code in (403, 429) and pace:
+                    pace.blocked()
+                    logger.warning('IS24 search p%d HTTP %d — retrying (%d/%d)', page,
+                                   resp.status_code, attempt + 1, SEARCH_RETRIES)
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                if pace:
+                    pace.ok()
+                return data
+            except Exception as e:
+                if pace:
+                    pace.failed()
+                logger.error('IS24 API failed (p%d): %s', page, e)
+                return None
+        logger.error('IS24 API failed (p%d): still blocked after %d tries', page, SEARCH_RETRIES)
+        return None
 
     def describe_search(self, url: str) -> tuple[int | None, str]:
         parsed = self._parse_search_url(url)
@@ -249,13 +268,13 @@ class ImmoScoutSource(Source):
             return None, self._label(parsed)
         return data.get('totalResults'), self._label(parsed)
 
-    def fetch_search(self, url: str, max_pages: int = 5) -> list[ScrapedListing]:
+    def fetch_search(self, url: str, max_pages: int = 5, pace=None) -> list[ScrapedListing]:
         parsed = self._parse_search_url(url)
         if parsed is None:
             return []
         seen: dict[str, ScrapedListing] = {}
         for page in range(1, max_pages + 1):
-            data = self._api_get(parsed, page)
+            data = self._api_get(parsed, page, pace)
             if data is None:
                 raise SearchIncomplete(f'IS24 search page {page} failed', list(seen.values()))
             results = data.get('results') or []
@@ -270,7 +289,8 @@ class ImmoScoutSource(Source):
             logger.info('IS24 search p%d: %d items (%d total)', page, len(results), len(seen))
             if page >= int(data.get('numberOfPages', page)):
                 break
-            time.sleep(1.0)
+            if not pace:
+                time.sleep(1.0)
         return list(seen.values())
 
     def _parse_item(self, item: dict) -> ScrapedListing | None:

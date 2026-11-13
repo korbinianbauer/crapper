@@ -208,6 +208,27 @@ def _note_attempt(source):
     _pace(source, 1.0)
 
 
+class _SearchPace:
+    """Pacing hook for a source's search pages: the same shared interval (`detail_block_<source>`)
+    as the ad pages, so searches and ad-page fetches of all polls never send at once."""
+
+    def __init__(self, source):
+        self.source = source
+
+    def before(self):
+        while not (_ready_at(self.source) <= datetime.utcnow() and _reserve(self.source)):
+            time.sleep(1.0)
+
+    def ok(self):
+        _note_success(self.source)
+
+    def blocked(self):
+        _register_block(self.source)
+
+    def failed(self):
+        _note_attempt(self.source)
+
+
 class _DetailJob:
     """A search hit whose full ad page should be archived (phase 2 of a poll)."""
     __slots__ = ('source', 'lid', 'url', 'seen_at', 'priceless', 'trackers')
@@ -428,7 +449,8 @@ def _poll_search_tracker(tracker: dict, source, jobs: dict) -> dict:
 
     complete = True
     try:
-        results = source.fetch_search(tracker['url'], max_pages=max_pages)
+        extra = {'pace': _SearchPace(source)} if source.paced_search else {}
+        results = source.fetch_search(tracker['url'], max_pages=max_pages, **extra)
     except SearchIncomplete as e:
         results, complete = e.results, False
         logger.warning('Search tracker %d (%s) incomplete: %s — %d listings read, nothing deactivated',
