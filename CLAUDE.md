@@ -135,7 +135,18 @@ price and the ML rating (`fair_delta` = asking price vs. fair price in %, negati
   written only when content changes; fields a scrape lacks are carried over from the
   previous version. Empty titles / placeholder images never overwrite stored values
   (`db.upsert_listing`). Images are downloaded to `archive/images/` (`archive.py`)
-  and served via `/archive/img/<file>`; the UI falls back to the remote URL.
+  and served via `/archive/img/<file>`; the UI falls back to the remote URL. Per ad the **large** variant
+  of every picture is kept (`Source.full_image_url`), stored as JPEG q85 / ≤ 2000 px only if that is smaller
+  (GIF, real transparency and JPEGs already ≤ q85 within 2000 px stay untouched; `recompress`, once per
+  file and pipeline version in `image_checked`). A small search preview is never kept as a separate file: where no
+  large variant can be fetched, `archive_full_images` stores the small one *under the large variant's name*
+  (`download_image(url, store_as=full)`), so gallery, archive page and thumbnail treat it as that picture's
+  large file. The overview card shows a 384×288 centre-cropped **thumbnail** (`archive.thumbnail`, cached in
+  `archive/thumbs-384x288/`, route `/archive/thumb/<file>`) made from the best archived file
+  (`archive.best_image_file`). After every poll `poller.recompress_work` (also driven during rate-limit
+  waits) goes through all listings of the polled trackers, gone ones included: previews of old downloads
+  are moved to the large name (`archive.promote_preview`) or deleted if a large file exists, files are
+  recompressed, missing thumbnails created.
 - **`assets`** / **`version_assets`** — the archived page is *self-contained*
   (`pagearchive.py`): after each poll `archive_pending()` fetches every stylesheet
   (recursively: `@import`, `url()`), font and image a stored `raw_html` references into

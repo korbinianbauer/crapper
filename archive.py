@@ -82,10 +82,11 @@ def _to_jpeg(data: bytes, ctype: str) -> tuple[bytes, str]:
     return out.getvalue(), 'image/jpeg'
 
 
-def download_image(url: str) -> str | None:
+def download_image(url: str, store_as: str | None = None) -> str | None:
     """Store *url* under archive/images/<sha1(url)>.<ext>; returns the file name
-    (reuses an existing file). None on failure."""
-    key = hashlib.sha1(url.encode()).hexdigest()
+    (reuses an existing file). With *store_as* the file is keyed by that URL instead (a small stand-in
+    saved as the "large" file of a picture whose large variant is not available). None on failure."""
+    key = hashlib.sha1((store_as or url).encode()).hexdigest()
     os.makedirs(IMG_DIR, exist_ok=True)
     for ext in _TYPES.values():
         if os.path.exists(os.path.join(IMG_DIR, key + ext)):
@@ -212,3 +213,26 @@ def best_image_file(source, image_url: str | None, image_file: str | None) -> st
         except Exception:
             pass
     return image_file
+
+
+def remove_image(name: str):
+    """Delete an archived image file (its thumbnail, if any, is kept)."""
+    try:
+        os.remove(os.path.join(IMG_DIR, name))
+    except OSError:
+        pass
+
+
+def promote_preview(preview: str, full_url: str) -> str:
+    """A small preview without a large variant becomes the picture's "large" file (name keyed by
+    *full_url*), so everything — gallery, archive page, thumbnail — finds it there. Returns the new name."""
+    ext = os.path.splitext(preview)[1]
+    new = hashlib.sha1(full_url.encode()).hexdigest() + ext
+    if new == preview:
+        return preview
+    if os.path.exists(os.path.join(IMG_DIR, new)):        # lost a race: the large file is there already
+        remove_image(preview)
+        return new
+    os.replace(os.path.join(IMG_DIR, preview), os.path.join(IMG_DIR, new))
+    db.rename_image_file(preview, new)
+    return new

@@ -23,23 +23,32 @@ def _upsert(source, r, seen_at) -> int:
     lid = db.upsert_listing(
         source.name, r.ad_id, r.url, r.title, r.location, r.image_url, seen_at,
         description=r.description, images=r.images, raw_html=r.raw_html)
-    url = db.listing_needs_image(lid)
-    if url and (fname := archive.download_image(url)):
-        db.set_image_file(lid, url, fname)
     archive_full_images(source, [*r.images, r.image_url])
     return lid
 
 
 def recompress_images(source, lid):
-    """Convert the listing's already archived images to the current storage format (once per file) and
-    make sure its card thumbnail exists."""
+    """Per listing: a small preview without a large variant becomes that picture's "large" file; images are
+    converted to the current storage format (once per file); the card thumbnail is made; previews that
+    are redundant (a large file exists) are dropped."""
     try:
-        for u in db.listing_image_urls(lid):
-            for url in dict.fromkeys([source.full_image_url(u), u]):
-                if name := archive.local_name(url):
-                    archive.recompress(name)
-        if (l := db.get_listing(lid)) and (name := archive.best_image_file(source, l['image_url'], l['image_file'])):
-            archive.thumbnail(name)          # cheap no-op if it already exists
+        redundant = []
+        urls = db.listing_image_urls(lid)
+        for u in urls:
+            full = source.full_image_url(u)
+            if full != u and (preview := archive.local_name(u)):
+                if archive.local_name(full):
+                    redundant.append(preview)
+                else:
+                    archive.promote_preview(preview, full)
+        for u in urls:
+            if name := archive.local_name(source.full_image_url(u)):
+                archive.recompress(name)
+        l = db.get_listing(lid)
+        best = l and archive.best_image_file(source, l['image_url'], l['image_file'])
+        if best and archive.thumbnail(best):              # no thumbnail → keep the previews
+            for preview in redundant:
+                archive.remove_image(preview)
     except Exception:
         logger.exception('Image recompression failed for listing %s', lid)
 
@@ -73,7 +82,7 @@ def archive_full_images(source, urls):
             continue
         seen.add(full)
         if not archive.download_image(full) and full != u:
-            archive.download_image(u)      # no larger variant available: keep what we have
+            archive.download_image(u, store_as=full)   # no larger variant available: the small one stands in
 
 
 DETAIL_INTERVAL = timedelta(hours=20)    # "at least daily" with slack for poll jitter
