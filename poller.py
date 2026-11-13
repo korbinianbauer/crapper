@@ -11,7 +11,7 @@ import archive
 import db
 import pagearchive
 import sources
-from sources.base import RateLimited, SearchIncomplete
+from sources.base import FetchFailed, RateLimited, SearchIncomplete
 
 logger = logging.getLogger(__name__)
 
@@ -377,6 +377,12 @@ def _poll_listing_tracker(tracker: dict, source, lid: int | None):
     except RateLimited:
         _register_block(source)
         raise _Limited()
+    except FetchFailed as e:               # says nothing about the ad: change nothing, try again next poll
+        logger.warning('Listing tracker %d (%s): fetch failed, nothing changed: %s', tracker['id'], source.name, e)
+        _note_attempt(source)
+        if lid:
+            db.mark_detail_tried(lid, seen_at)
+        return
     _note_success(source)
 
     if scraped is None:

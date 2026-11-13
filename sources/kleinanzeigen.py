@@ -15,7 +15,7 @@ from urllib.parse import urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 
-from .base import RateLimited, ScrapedListing, SearchIncomplete, Source, UrlInfo
+from .base import FetchFailed, RateLimited, ScrapedListing, SearchIncomplete, Source, UrlInfo
 
 logger = logging.getLogger(__name__)
 
@@ -217,15 +217,15 @@ class KleinanzeigenSource(Source):
             resp = self._get(url)
         except Exception as e:
             logger.error('KA listing fetch error %s: %s', url, e)
-            return None
-        if resp.status_code == 404:
+            raise FetchFailed(f'KA listing fetch error: {e}')
+        if resp.status_code in (404, 410):
             return None
         if resp.status_code in (403, 429):
             logger.warning('KA listing %s HTTP %s (rate-limited/blocked)', ad_id, resp.status_code)
             raise RateLimited(f'KA HTTP {resp.status_code}')
         if resp.status_code != 200:
             logger.warning('KA listing %s HTTP %s', ad_id, resp.status_code)
-            return None
+            raise FetchFailed(f'KA listing HTTP {resp.status_code}')
         html = resp.text
         if any(m in html for m in _REMOVED_MARKERS):
             return None

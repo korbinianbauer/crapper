@@ -13,6 +13,11 @@ class RateLimited(Exception):
     Distinct from "ad removed" (None) so callers can back off instead of giving up."""
 
 
+class FetchFailed(Exception):
+    """An ad page could not be fetched for a reason that says nothing about the ad (network error,
+    HTTP 5xx, unreadable response). Distinct from "ad removed" (None): callers must not deactivate."""
+
+
 class SearchIncomplete(Exception):
     """A search could not be read completely (HTTP error, block page …). `results` holds what was read.
     The poller still stores those, but must NOT deactivate the listings it did not see."""

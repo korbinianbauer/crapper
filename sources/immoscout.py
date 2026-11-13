@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
-from .base import RateLimited, ScrapedListing, SearchIncomplete, Source, UrlInfo
+from .base import FetchFailed, RateLimited, ScrapedListing, SearchIncomplete, Source, UrlInfo
 
 logger = logging.getLogger(__name__)
 
@@ -145,21 +145,21 @@ class ImmoScoutSource(Source):
             resp = requests.get(f'{_API}/expose/{ad_id}', headers=_API_HEADERS, timeout=_TIMEOUT)
         except Exception as e:
             logger.error('IS24 expose fetch error %s: %s', ad_id, e)
-            return None
-        if resp.status_code == 404:
+            raise FetchFailed(f'IS24 expose fetch error: {e}')
+        if resp.status_code in (404, 410):
             return None
         if resp.status_code in (403, 429):
             logger.warning('IS24 expose %s HTTP %s (rate-limited/blocked)', ad_id, resp.status_code)
             raise RateLimited(f'IS24 HTTP {resp.status_code}')
         if resp.status_code != 200:
             logger.warning('IS24 expose %s HTTP %s', ad_id, resp.status_code)
-            return None
+            raise FetchFailed(f'IS24 expose HTTP {resp.status_code}')
         try:
             data = resp.json()
         except ValueError:
-            return None
-        if 'sections' not in data or 'header' not in data:
-            return None
+            raise FetchFailed('IS24 expose: response is not JSON')
+        if not isinstance(data, dict) or 'sections' not in data or 'header' not in data:
+            raise FetchFailed('IS24 expose: unexpected response')
         state = (data['header'].get('publicationState') or '').lower()
         if state in _REMOVED_STATES:      # deactivated / expired → treat as removed
             return None
