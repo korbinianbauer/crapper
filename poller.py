@@ -110,14 +110,15 @@ def archive_full_images(source, urls):
 DETAIL_INTERVAL = timedelta(hours=20)    # "at least daily" with slack for poll jitter
 
 # Ad-page fetches of a source are paced by one persistent interval: the time between
-# two requests. It doubles after every 403/429 and halves after every
-# successful fetch, always staying within the source's (min, max) — the min is also the
-# start value. Default 1 s … 4 h; per-source overrides in BACKOFF_LIMITS.
+# two requests. It grows after every 403/429 and shrinks after every successful fetch
+# (default ×2 / ×0.5), always staying within the source's (min, max) — the min is also
+# the start value. Default 1 s … 4 h; per-source overrides in BACKOFF_PACING.
 BACKOFF_MIN = timedelta(seconds=1)
 BACKOFF_MAX = timedelta(hours=4)
-BACKOFF_LIMITS = {'immoscout': (timedelta(seconds=10), timedelta(minutes=4))}
 BACKOFF_GROWTH = 2.0
 BACKOFF_DECAY = 0.5
+# source → (min, max, growth per 403/429, decay per success)
+BACKOFF_PACING = {'immoscout': (timedelta(seconds=10), timedelta(minutes=4), 1.10, 0.98)}
 LIMITED_TO_BACK = 3                      # an ad blocked this often in one poll is retried last
 MAX_POLL_WAIT = timedelta(hours=4)       # a poll gives up on items not due within this of its start
 IN_FLIGHT = timedelta(minutes=2)         # slot reserved for a running request (crash safety)
@@ -127,9 +128,14 @@ IN_FLIGHT = timedelta(minutes=2)         # slot reserved for a running request (
 # share one interval per source and never send at the same time.
 
 
+def _pacing(source) -> tuple[float, float, float, float]:
+    lo, hi, grow, decay = BACKOFF_PACING.get(
+        source.name, (BACKOFF_MIN, BACKOFF_MAX, BACKOFF_GROWTH, BACKOFF_DECAY))
+    return lo.total_seconds(), hi.total_seconds(), grow, decay
+
+
 def _limits(source) -> tuple[float, float]:
-    lo, hi = BACKOFF_LIMITS.get(source.name, (BACKOFF_MIN, BACKOFF_MAX))
-    return lo.total_seconds(), hi.total_seconds()
+    return _pacing(source)[:2]
 
 
 def _block_key(source) -> str:
@@ -187,14 +193,14 @@ def _pace(source, factor: float) -> dict:
 
 def _register_block(source):
     """Rate-limited (403/429): double the interval; the next request waits for it."""
-    st = _pace(source, BACKOFF_GROWTH)
+    st = _pace(source, _pacing(source)[2])
     logger.warning('%s ad pages rate-limited — interval now %s (next request %s UTC)',
                    source.name, timedelta(seconds=round(st['delay'])), st['next'][11:19])
 
 
 def _note_success(source):
     """An ad-page request that was not rate-limited: halve the interval."""
-    _pace(source, BACKOFF_DECAY)
+    _pace(source, _pacing(source)[3])
 
 
 def _note_attempt(source):

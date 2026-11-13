@@ -211,8 +211,8 @@ price and the ML rating (`fair_delta` = asking price vs. fair price in %, negati
   at read time (`db.get_fair_price_map` / `get_fair_price`); `fair_prices` always stores the raw prediction.
 - **`settings`** — `poll_cron` (default `0 4 * * *`), `search_pages`, `detail_block_<source>` (JSON
   `{delay, next}`: persistent pacing of ad-page fetches — `delay` = seconds between two requests of the source
-  (starts at its minimum, always within 1 s … 4 h; ImmoScout 10 s … 4 min, `poller.BACKOFF_LIMITS`), ×2 after every HTTP 403/429 (`RateLimited` from the source), ×0.5 after
-  every successful fetch; `next` = earliest time of the next request (see Kleinanzeigen notes)).
+  (starts at its minimum, always within 1 s … 4 h; ImmoScout 10 s … 4 min, `poller.BACKOFF_PACING`), ×2 after every HTTP 403/429 (`RateLimited` from the source), ×0.5 after
+  every successful fetch (ImmoScout: ×1.1 / ×0.98); `next` = earliest time of the next request (see Kleinanzeigen notes)).
 
 `init_db()` drops & recreates the data tables if it detects a pre-multi-source
 schema (no `trackers.source` column). No backward compatibility is maintained.
