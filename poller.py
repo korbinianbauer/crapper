@@ -3,6 +3,7 @@ disappeared listings."""
 import json
 from collections import Counter
 import logging
+import os
 import time
 from datetime import datetime, timedelta
 
@@ -44,13 +45,34 @@ def recompress_images(source, lid):
         for u in urls:
             if name := archive.local_name(source.full_image_url(u)):
                 archive.recompress(name)
+        _repair_image_refs(source, lid)                   # before the thumbnail: no stale file names
         l = db.get_listing(lid)
         best = l and archive.best_image_file(source, l['image_url'], l['image_file'])
         if best and archive.thumbnail(best):              # no thumbnail → keep the previews
             for preview in redundant:
                 archive.remove_image(preview)
+        _repair_image_refs(source, lid)
     except Exception:
         logger.exception('Image recompression failed for listing %s', lid)
+
+
+def _repair_image_refs(source, lid):
+    """image_file references to files that no longer exist (deleted previews) point to the picture's large
+    file instead, or become NULL."""
+    def exists(name):
+        return bool(name) and os.path.exists(os.path.join(archive.IMG_DIR, name))
+
+    def current(url):
+        return (archive.local_name(source.full_image_url(url)) or archive.local_name(url)) if url else None
+
+    listing, versions = db.get_image_refs(lid)
+    new_listing = False
+    if listing and listing['image_file'] and not exists(listing['image_file']):
+        new_listing = current(listing['image_url'])
+    new_versions = {v['version']: current(v['image_url']) for v in versions
+                    if v['image_file'] and not exists(v['image_file'])}
+    if new_listing is not False or new_versions:
+        db.set_image_refs(lid, new_listing, new_versions)
 
 
 def recompress_work(trackers: list[dict]):

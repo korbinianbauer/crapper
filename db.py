@@ -595,6 +595,25 @@ def mark_image_checked(name: str):
         conn.execute('INSERT OR REPLACE INTO image_checked (file, v) VALUES (?, ?)', (name, IMAGE_PIPELINE))
 
 
+def get_image_refs(listing_id: int) -> tuple[dict | None, list[dict]]:
+    """(listing row, version rows) with their image_url / image_file — to repair dangling file references."""
+    with get_db() as conn:
+        l = conn.execute('SELECT image_url, image_file FROM listings WHERE id = ?', (listing_id,)).fetchone()
+        v = conn.execute('SELECT version, image_url, image_file FROM listing_versions WHERE listing_id = ?',
+                         (listing_id,)).fetchall()
+    return (dict(l) if l else None), [dict(r) for r in v]
+
+
+def set_image_refs(listing_id: int, listing_file: str | None | bool = False, versions: dict | None = None):
+    """Set listings.image_file (unless False) and listing_versions.image_file per version number."""
+    with get_db() as conn:
+        if listing_file is not False:
+            conn.execute('UPDATE listings SET image_file = ? WHERE id = ?', (listing_file, listing_id))
+        for ver, name in (versions or {}).items():
+            conn.execute('UPDATE listing_versions SET image_file = ? WHERE listing_id = ? AND version = ?',
+                         (name, listing_id, ver))
+
+
 def rename_image_file(old: str, new: str):
     """An archived image file was converted: repoint all references."""
     with get_db() as conn:
