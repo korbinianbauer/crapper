@@ -223,6 +223,7 @@ def init_db():
               FROM listings l
              WHERE NOT EXISTS (SELECT 1 FROM listing_versions v WHERE v.listing_id = l.id)''')
         conn.execute('CREATE TABLE IF NOT EXISTS image_checked (file TEXT PRIMARY KEY)')
+        _add_columns_if_missing(conn, 'image_checked', {'v': 'INTEGER NOT NULL DEFAULT 1'})
         _prune_phantom_versions(conn)
         _init_default_settings(conn)
 
@@ -579,14 +580,19 @@ def set_image_file(listing_id: int, image_url: str, image_file: str):
             (image_file, image_url, listing_id))
 
 
-def is_image_checked(name: str) -> bool:
+IMAGE_PIPELINE = 2        # 1 = JPEG q85, 2 = + longest edge capped (archive.MAX_EDGE)
+
+
+def image_checked_version(name: str) -> int:
+    """Pipeline version the archived file was last processed with (0 = never)."""
     with get_db() as conn:
-        return conn.execute('SELECT 1 FROM image_checked WHERE file = ?', (name,)).fetchone() is not None
+        r = conn.execute('SELECT v FROM image_checked WHERE file = ?', (name,)).fetchone()
+    return r[0] if r else 0
 
 
 def mark_image_checked(name: str):
     with get_db() as conn:
-        conn.execute('INSERT OR IGNORE INTO image_checked (file) VALUES (?)', (name,))
+        conn.execute('INSERT OR REPLACE INTO image_checked (file, v) VALUES (?, ?)', (name, IMAGE_PIPELINE))
 
 
 def rename_image_file(old: str, new: str):

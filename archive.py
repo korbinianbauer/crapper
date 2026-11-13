@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 IMG_DIR = os.path.join(os.path.dirname(__file__), 'archive', 'images')
 JPEG_QUALITY = 85
+MAX_EDGE = 2000                 # px; larger photos are scaled down (aspect ratio kept)
 _TYPES = {'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif'}
 
 
@@ -38,6 +39,8 @@ def _to_jpeg(data: bytes, ctype: str) -> tuple[bytes, str]:
         im = ImageOps.exif_transpose(src)
         if im.mode != 'RGB':
             im = im.convert('RGB')
+        if max(im.size) > MAX_EDGE:
+            im.thumbnail((MAX_EDGE, MAX_EDGE), Image.LANCZOS)
         out = io.BytesIO()
         im.save(out, 'JPEG', quality=JPEG_QUALITY, optimize=True)
     except Exception as e:
@@ -88,10 +91,21 @@ def recompress(name: str) -> str:
     """Bring an already archived image to the current storage format (see `_to_jpeg`) and return its
     (possibly new) file name. A converted PNG/WebP becomes `<key>.jpg`; the DB references are updated
     before the old file is removed. Every file is processed once (`db.image_checked`)."""
-    if not name or db.is_image_checked(name):
+    if not name:
+        return name
+    v = db.image_checked_version(name)
+    if v >= db.IMAGE_PIPELINE:
         return name
     path = os.path.join(IMG_DIR, name)
     key, ext = os.path.splitext(name)
+    if v and Image is not None:                 # processed by an older version: only the new size cap is missing
+        try:
+            with Image.open(path) as im:
+                if max(im.size) <= MAX_EDGE:
+                    db.mark_image_checked(name)
+                    return name
+        except Exception:
+            return name
     try:
         with open(path, 'rb') as f:
             data = f.read()
