@@ -343,6 +343,16 @@ class Encoder:
             out.append(x)
         return np.array(out, dtype=float)
 
+    def slices(self) -> dict:
+        """{feature key: slice of its columns in `transform`'s output} (one-hot / missing flag included)."""
+        out, i = {}, 0
+        for f in self.features:
+            k = f['key']
+            w = len(self.cats[k]) if f['type'] == 'cat' else 1 + (f['type'] == 'num' and k in self.flag)
+            out[k] = slice(i, i + w)
+            i += w
+        return out
+
 
 def _candidates():
     from sklearn.ensemble import GradientBoostingRegressor
@@ -415,9 +425,10 @@ class MaskedBoost:
 
     def predict(self, X):
         """(n, k) log prices — every output for every row, whatever the row's own offer is."""
+        X = np.ascontiguousarray(X, dtype=np.float32)    # what tree.apply converts to anyway — once, not per tree
         F = np.tile(self.base_, (len(X), 1))
         for tree, val in zip(self.trees_, self.values_):
-            F += self.learning_rate * val[tree.apply(X)]
+            F += self.learning_rate * val[tree.tree_.apply(X)]     # low-level apply: no per-tree input validation
         return F
 
 
@@ -737,18 +748,30 @@ def feature_impacts(model_id, fs_id, features, offer=None, n_ref=120):
         rng = np.random.RandomState(0)
         if len(rows) > n_ref:
             rows = [rows[i] for i in rng.choice(len(rows), n_ref, replace=False)]
-        _IMPACT_CACHE[model_id] = (art['encoder'], art['model'], rows)
-    enc, model, refs = _IMPACT_CACHE[model_id]
+        enc = art['encoder']
+        _IMPACT_CACHE[model_id] = (enc, art['model'], enc.transform(rows), enc.slices())
+    enc, model, R, sl = _IMPACT_CACHE[model_id]
     col = OFFERS.index(offer) if offer in OFFERS else 0      # multi-output model: the listing's own offer
 
-    def run(rows):
-        p = np.exp(model.predict(enc.transform(rows)))
+    def run(X):
+        p = np.exp(model.predict(X))
         return p[:, col] if p.ndim == 2 else p
-    own = float(run([features])[0])
+    x = enc.transform([features])[0]
+    own = float(run(x[None, :])[0])
     keys = [f['key'] for f in enc.features]
-    batch = [{**features, k: r.get(k)} for k in keys for r in refs]
-    pred = run(batch).reshape(len(keys), len(refs)).mean(axis=1)
-    return own, {k: own - float(p) for k, p in zip(keys, pred)}
+    # each feature only touches its own columns: tile the listing and put in the references' values of key k.
+    # References sharing a value give the same prediction -> one row per distinct value, weighted by its count.
+    blocks = [np.unique(R[:, sl[k]], axis=0, return_counts=True) for k in keys]
+    batch = np.tile(x, (sum(len(v) for v, _ in blocks), 1))
+    i = 0
+    for k, (vals, _) in zip(keys, blocks):
+        batch[i:i + len(vals), sl[k]] = vals
+        i += len(vals)
+    p, out, i = run(batch), {}, 0
+    for k, (vals, cnt) in zip(keys, blocks):
+        out[k] = own - float(np.dot(p[i:i + len(vals)], cnt) / cnt.sum())
+        i += len(vals)
+    return own, out
 
 
 def _importances(model, algo, X, y, names):
