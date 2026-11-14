@@ -166,7 +166,7 @@ def init_db():
             );
             -- Prediction per listing and model, always made without the model having seen
             -- the listing's price: out-of-fold for training listings, the stored model for new ones.
-            CREATE TABLE IF NOT EXISTS fair_prices (
+            CREATE TABLE IF NOT EXISTS fair_prices (   -- fair_other: unified model's prediction for the OTHER offer (rent <-> sale)
                 listing_id   INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
                 model_id     INTEGER NOT NULL REFERENCES ml_models(id) ON DELETE CASCADE,
                 fair_price   REAL NOT NULL,
@@ -211,10 +211,11 @@ def init_db():
         _add_columns_if_missing(conn, 'trackers', {
             'parent_id': 'INTEGER REFERENCES trackers(id) ON DELETE SET NULL',
         })
-        # Only gradient boosting is supported: drop models of any other algorithm (+ their predictions).
+        # Only gradient boosting (and its multi-output variant of the unified model) is supported:
+        # drop models of any other algorithm (+ their predictions).
         conn.execute("DELETE FROM fair_prices WHERE model_id IN "
-                     "(SELECT id FROM ml_models WHERE algo != 'gradient_boosting')")
-        conn.execute("DELETE FROM ml_models WHERE algo != 'gradient_boosting'")
+                     "(SELECT id FROM ml_models WHERE algo NOT IN ('gradient_boosting', 'masked_boosting'))")
+        conn.execute("DELETE FROM ml_models WHERE algo NOT IN ('gradient_boosting', 'masked_boosting')")
         # Seed v1 for listings that predate versioning.
         conn.execute('''
             INSERT INTO listing_versions (listing_id, version, fetched_at, title, location,
@@ -224,6 +225,7 @@ def init_db():
              WHERE NOT EXISTS (SELECT 1 FROM listing_versions v WHERE v.listing_id = l.id)''')
         conn.execute('CREATE TABLE IF NOT EXISTS image_checked (file TEXT PRIMARY KEY)')
         _add_columns_if_missing(conn, 'image_checked', {'v': 'INTEGER NOT NULL DEFAULT 1'})
+        _add_columns_if_missing(conn, 'fair_prices', {'fair_other': 'REAL'})
         _prune_phantom_versions(conn)
         _init_default_settings(conn)
 
@@ -712,6 +714,7 @@ def get_training_rows(feature_set_id: int) -> list[dict]:
         data = json.loads(r['data'])
         out.append({'listing_id': r['listing_id'], 'price': r['price'], 'cost': data.get('_cost'),
                     'offer': data.get('_angebot'),        # 'miete' | 'kauf' (unified feature sets only)
+                    'skip': bool(data.get('_skip')),      # no property / wanted ad / wrong data: never trained or predicted
                     'features': {k: v for k, v in data.items() if not k.startswith('_')}})
     return out
 
@@ -750,6 +753,11 @@ def set_cost_assumptions(feature_set_id: int, values: dict):
 KEEP_MODELS = 10          # trained models kept per feature set (the active one is never pruned)
 
 
+def _own_other(p) -> tuple:
+    """A prediction is a float, or (own offer, other offer) for a unified multi-output model."""
+    return tuple(p) if isinstance(p, (tuple, list)) else (p, None)
+
+
 def save_model(feature_set_id: int, algo: str, n_train: int, metrics: dict, artifact: bytes,
                predictions: dict[int, float], activate: bool = True) -> int:
     """Store a trained model and its predictions {listing_id: raw fair_price}. Older models
@@ -765,9 +773,9 @@ def save_model(feature_set_id: int, algo: str, n_train: int, metrics: dict, arti
                                                      metrics, artifact) VALUES (?, ?, ?, ?, ?, ?)''',
                            (feature_set_id, algo, now, n_train, json.dumps(metrics), artifact))
         mid = cur.lastrowid
-        conn.executemany('''INSERT INTO fair_prices (listing_id, model_id, fair_price, oof, predicted_at)
-                            VALUES (?, ?, ?, 1, ?)''',
-                         [(lid, mid, p, now) for lid, p in predictions.items()])
+        conn.executemany('''INSERT INTO fair_prices (listing_id, model_id, fair_price, fair_other, oof, predicted_at)
+                            VALUES (?, ?, ?, ?, 1, ?)''',
+                         [(lid, mid, *_own_other(p), now) for lid, p in predictions.items()])
         if activate:
             conn.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)',
                          (f'fair_model_{feature_set_id}', str(mid)))
@@ -886,8 +894,8 @@ def save_predictions(model_id: int, predictions: dict[int, float]) -> None:
     now = _now()
     with get_db() as conn:
         conn.executemany('''INSERT OR REPLACE INTO fair_prices
-                            (listing_id, model_id, fair_price, oof, predicted_at) VALUES (?, ?, ?, 1, ?)''',
-                         [(lid, model_id, p, now) for lid, p in predictions.items()])
+                            (listing_id, model_id, fair_price, fair_other, oof, predicted_at) VALUES (?, ?, ?, ?, 1, ?)''',
+                         [(lid, model_id, *_own_other(p), now) for lid, p in predictions.items()])
 
 
 def save_listing_predictions(feature_set_id: int, model_id: int | None, rows: dict[int, dict],
@@ -920,14 +928,14 @@ def active_model_id(feature_set_id: int) -> int | None:
 
 
 def _unified_view(met: dict, offer: str | None, features: dict):
-    """(factor, per_range) of one listing under a unified model (`ml.train`): the model predicts the
-    normalised Warmmiete; a sale listing is compared with it × factor. Listings flagged by `exclude`
-    (Tausch, WG, Nießbrauch) get an empty window = never plausible, so they are not rated."""
+    """per_range of one listing under a unified model (`ml.train_unified`): the plausible €/m² window of its
+    offer. Listings flagged by `exclude` (Tausch, WG, Nießbrauch) get an empty window = never plausible,
+    so they are not rated. Other models: their own `per_range`."""
     if not met.get('unified'):
-        return 1.0, met.get('per_range')
+        return met.get('per_range')
     if any(features.get(k) for k in met.get('exclude') or []):
-        return (met['factor'] if offer == 'kauf' else 1.0), [0, 0]
-    return (met['factor'] if offer == 'kauf' else 1.0), (met.get('ranges') or {}).get(offer)
+        return [0, 0]
+    return (met.get('ranges') or {}).get(offer)
 
 
 def _is_unified_def(definition_json: str) -> bool:
@@ -940,7 +948,7 @@ def _is_unified_def(definition_json: str) -> bool:
 def get_fair_price_map() -> dict[int, dict]:
     """{listing_id: {fair_price, raw, features, per}} from each feature set's active model.
     `fair_price` includes the manual offset, `raw` is the pure ML prediction. Under a unified model
-    (rent + sale) both are in the unit of the listing's own offer (sale listings: × the Kauf/Miete factor).
+    (rent + sale) both are the prediction for the listing's own offer.
     The unified set is processed last, so it wins over older per-tracker sets for the same listing."""
     out = {}
     with get_db() as conn:
@@ -961,8 +969,8 @@ def get_fair_price_map() -> dict[int, dict]:
                 data = json.loads(r['data']) if r['data'] else {}
                 met = json.loads(r['metrics'])
                 feats = {k: v for k, v in data.items() if not k.startswith('_')}
-                ufac, rng = _unified_view(met, data.get('_angebot'), feats)
-                out[r['listing_id']] = {'fair_price': r['fair_price'] * ufac * factor, 'raw': r['fair_price'] * ufac,
+                rng = _unified_view(met, data.get('_angebot'), feats)
+                out[r['listing_id']] = {'fair_price': r['fair_price'] * factor, 'raw': r['fair_price'],
                                         'features': feats, 'offer': data.get('_angebot'),
                                         'cost': data.get('_cost'), 'assume': met.get('cost_assumptions'),
                                         'model_id': r['model_id'], 'trained_at': r['trained_at'],
@@ -994,10 +1002,8 @@ def get_fair_price(listing_id: int) -> dict | None:
     d['cost'] = data.get('_cost')
     d['offer'] = data.get('_angebot')
     d['definition'] = json.loads(d['definition'])
-    ufac, rng = _unified_view(d['metrics'], d['offer'], d['features'])
-    d['unified_factor'] = d['metrics'].get('factor') if d['metrics'].get('unified') else None
-    d['per_range'] = rng
-    d['raw'] = d['fair_price'] * ufac
+    d['per_range'] = _unified_view(d['metrics'], d['offer'], d['features'])
+    d['raw'] = d['fair_price']
     d['offset'] = offset
     d['fair_price'] = d['raw'] * (1 + offset / 100)
     return d

@@ -145,7 +145,8 @@
   {% if fair.current %}
   <div><div class="lbl">Einordnung</div>
     {% set d = fair.delta_pct %}
-    {% if not fair.plausible %}<div class="muted" style="font-size:.85rem;">Preis unplausibel (z. B. Tausch/Platzhalter) – Einordnung nicht sinnvoll</div>
+    {% if fair.excluded %}<div class="muted" style="font-size:.85rem;">Nicht bewertet: {{ fair.excluded|join(', ') }} – der Preis ist mit normalen Angeboten nicht vergleichbar und wird weder trainiert noch eingeordnet.</div>
+    {% elif not fair.plausible %}<div class="muted" style="font-size:.85rem;">Preis unplausibel (z. B. Platzhalter) – Einordnung nicht sinnvoll</div>
     {% else %}<div class="big {{ 'cheap' if d <= -10 else ('dear' if d >= 10 else '') }}">
       {% if d <= -10 %}{{ -d }} % unter angemessen{% elif d >= 10 %}{{ d }} % über angemessen{% else %}angemessen ({{ '%+d'|format(d) }} %){% endif %}</div>{% endif %}</div>
   {% endif %}

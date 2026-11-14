@@ -192,13 +192,16 @@ price and the ML rating (`fair_delta` = asking price vs. fair price in %, negati
   sale (replaces the per-tracker sets and `wohnung_miete_gesamt_v1` / `wohnung_kaufen_v1` once trained — until then
   those still serve; `db.get_fair_price_map` processes the unified set last so it wins). Each listing carries
   `data["_angebot"]` = `miete`|`kauf` (+ `_cost` for rents); features are the union (see `scripts/migrate_unified_features.py`,
-  no ≤30 limit here). There are no listings with both prices, so `ml.sale_factor` takes the **average (geometric mean) ratio of
-  €/m² sale to €/m² normalised Warmmiete** (plausible listings only, ≈ 255 on the 13.11.2026 data) as synthetic ground truth: the model
-  learns the normalised-Warmmiete equivalent (sale price ÷ factor), every listing gets BOTH `fair_miete` and
-  `fair_kauf = fair_miete × factor` (`listing_predictions`). `fair_prices` stores the rent equivalent; `get_fair_price_map` /
-  `get_fair_price` multiply it by the factor for `kauf` listings, so rating code is unchanged. Plausibility windows per offer
+  no ≤30 limit here). **No factor, no offer feature**: `ml.MaskedBoost` is a multi-output gradient boosting
+  (outputs: log normalised Warmmiete, log purchase price); a listing only counts for the output of its own offer (loss
+  mask, weight 0 for the other), trees are shared, leaf values per output fitted from the labelled listings
+  (`ml.train_unified`, algo `masked_boosting` — `init_db` keeps that algo). CV (3×5-fold) gives out-of-fold predictions of BOTH outputs.
+  Every listing is predicted for both offers: `fair_prices.fair_price` = own offer, `fair_other` = the other offer;
+  `listing_predictions.data` has `fair_miete` and `fair_kauf`. Rating code is unchanged (own offer). Plausibility windows per offer
   (`definition.plausible`: miete 4–60, kauf 1500–15000 €/m²); `definition.exclude` (`tausch`, `wg`, `niessbrauch`) = listing is neither
-  trained on nor rated (`per_range` [0,0]). The factor is recomputed at every training and stored in the model's metrics.
+  trained on nor rated (`per_range` [0,0]). The cross-offer prediction of a listing (rent of a sale ad, price of a rent ad) cannot be
+  validated — no listing has both prices; `metrics.ratio` (implied purchase price ÷ monthly rent, median/p10/p90) is the sanity check
+  (13.11.2026: median 252, 10–90 % 181–325; CV median error rent 9.4 %, sale 10.3 %).
   Extraction (by the agent, never a script): save into `immobilie_v1` only, always with `_angebot`; houses add `grundstueck`
   and a house `typ`. Migrated listings have `_todo` = new features still to read from the ad (`seelage`, `denkmal`, `niessbrauch`;
   sale also `ausstattung`, `zustand`) — remove the keys from `_todo` when filled in. `dist_schliersee` is computed from the PLZ

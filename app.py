@@ -644,7 +644,7 @@ def _fair_info(listing_id, prices):
     fair['fair_kalt'] = _fair_offer(fair['fair_price_disp'], fair['eff'], fair['kalt']) if fair['kalt'] else None
     fair['bars'] = _rent_bars(rb, fair['fair_price_disp'], fair['features'].get('wohnflaeche')) if rb else None
     m = fair['metrics']
-    fair['mae'] = m['candidates'][m['chosen']]['mae']
+    fair['mae'] = ((m.get('by_offer') or {}).get(fair.get('offer')) or m['candidates'][m['chosen']])['mae']
     fair['median_ape'] = round(m['candidates'][m['chosen']]['median_ape'] * 100)
     feats = {f['key']: f for f in fair['definition']['features']}
     def show(f, v):
@@ -659,7 +659,11 @@ def _fair_info(listing_id, prices):
     # features missing from the stored dict have (almost) no effect -> 0; None only if nothing was stored
     imp = {f['key']: (stored.get(f['key'], 0.0) * fair['fair_price']) for f in fair['definition']['features']
            if f['key'] != 'wohnflaeche'} if stored else {}      # Wohnfläche: no figure (deviation from the mean is misleading)
-    fair['facts'] = [(f['label'], show(f, fair['features'].get(f['key'])), imp.get(f['key']))
+    excl_keys = set(fair['definition'].get('exclude') or []) if fair['definition'].get('unified') else set()
+    # exclusion flags (Tausch, WG, Nießbrauch) are not model inputs: no impact figure; set ones explain why there is no rating
+    fair['excluded'] = [feats[k]['label'] for k in excl_keys if fair['features'].get(k) and k in feats]
+    fair['facts'] = [(f['label'], show(f, fair['features'].get(f['key'])),
+                      None if f['key'] in excl_keys else imp.get(f['key']))
                      for f in fair['definition']['features']]
     cost = fair.get('cost')
     if cost is not None:          # extracted cost data that the model also predicts
@@ -689,10 +693,11 @@ def _predicted_facts(listing_id, fair):
     d, rent = p['data'], fair.get('cost') is not None
     out = [('Angemessene normierte Warmmiete' if rent else 'Angemessener Preis', _num(d['fair_price']) + ' €',
             'Modellwert ohne Offset' if fair.get('offset') else '')]
-    if 'fair_kauf' in d:      # unified model: one prediction, both prices (Kauf = Miete × Faktor, see ml.sale_factor)
-        out = [('Angemessene normierte Warmmiete', _num(d['fair_miete']) + ' €/Monat', 'Modellwert ohne Offset'),
+    if 'fair_kauf' in d:      # unified model: two outputs (rent, sale), each trained only on listings of that offer
+        out = [('Angemessene normierte Warmmiete', _num(d['fair_miete']) + ' €/Monat',
+                'Modellausgang Miete' + (' · ohne Offset' if fair.get('offset') else '')),
                ('Angemessener Kaufpreis', _num(d['fair_kauf']) + ' €',
-                f"Miete × Faktor {_num(d['factor'], 1)} (Ø Kaufpreis/Miete pro m²)")]
+                'Modellausgang Kauf' + (' · ohne Offset' if fair.get('offset') else ''))]
     if 'heat_kwh_m2' in d:
         used = d.get('heat_used') != 'anzeige'
         out.append(('Energiebedarf (kWh/m²·a)', _num(d['heat_kwh_m2']),
@@ -1054,7 +1059,10 @@ def settings_fair_pricing():
         fs['cost_models'] = (act['metrics'].get('cost_models') if act else None) or {}
         for m in fs['models']:
             c = m['metrics']['candidates'][m['metrics']['chosen']]
-            m['mae'], m['median_ape'], m['r2'] = round(c['mae']), round(c['median_ape'] * 100, 1), c['r2']
+            m['mae'] = round(c['mae']) if c.get('mae') is not None else None      # None: unified model, see by_offer
+            m['median_ape'], m['r2'] = round(c['median_ape'] * 100, 1), c['r2']
+            m['ratio'] = m['metrics'].get('ratio')
+            m['by_offer'] = m['metrics'].get('by_offer') or {}
     counts = db.get_tracker_listing_counts()
     with_fs = {fs['tracker_id'] for fs in sets}
     without = [dict(t, listing_count=counts.get(t['id'], 0)) for t in db.get_trackers(groups=False)
