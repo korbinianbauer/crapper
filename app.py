@@ -210,25 +210,25 @@ def _index_series(card: dict, fair: dict | None):
     if not fair or not fair.get('raw'):
         return None
     key = (card['id'], fair.get('model_id'), len(card['history']))
-    if key in _IDX_CACHE:
-        return _IDX_CACHE[key]
-    cm = ml.cost_models_for(fair.get('model_id'))
-    pts, memo = [], {}
-    for h in card['history']:
-        p = h['price']
-        if p is not None and p not in memo:
-            v = None
-            if ml.is_plausible(p, fair['features'], fair['per'], fair.get('per_range')):
-                v = ml.effective_price(p, fair.get('cost'), fair['features'], fair.get('assume'), cm) or p
-            memo[p] = v / fair['raw'] if v else None
-        pts.append((date.fromisoformat(h['t'][:10]), None if p is None else memo[p]))
+    pts = _IDX_CACHE.get(key)
+    if pts is None:
+        cm = ml.cost_models_for(fair.get('model_id'))
+        pts, memo = [], {}
+        for h in card['history']:
+            p = h['price']
+            if p is not None and p not in memo:
+                v = None
+                if ml.is_plausible(p, fair['features'], fair['per'], fair.get('per_range')):
+                    v = ml.effective_price(p, fair.get('cost'), fair['features'], fair.get('assume'), cm) or p
+                memo[p] = v / fair['raw'] if v else None
+            pts.append((date.fromisoformat(h['t'][:10]), None if p is None else memo[p]))
+        _IDX_CACHE[key] = pts
     if not any(x[1] is not None for x in pts):
         return None
+    # `end` depends on today / last_seen, so it must NOT be cached with the points
     end = date.today() if card.get('active', True) else \
         min(date.today(), date.fromisoformat((card.get('last_seen') or '')[:10] or date.today().isoformat()))
-    res = (pts[0][0], max(end, pts[0][0]), pts, fair.get('trained_at'))
-    _IDX_CACHE[key] = res
-    return res
+    return (pts[0][0], max(end, pts[0][0]), pts, fair.get('trained_at'))
 
 
 def _price_index(items: list[dict], fair_map: dict, today: date | None = None,
