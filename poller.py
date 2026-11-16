@@ -5,11 +5,12 @@ from collections import Counter
 import logging
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import archive
 import db
 import pagearchive
+import priceindex
 import sources
 from sources.base import FetchFailed, RateLimited, SearchIncomplete
 
@@ -345,6 +346,7 @@ def poll_all_due():
         pagearchive.archive_pending()
     except Exception as e:
         logger.error('Asset archiving failed: %s', e)
+    priceindex.safe_recompute(since=(date.today() - timedelta(days=1)).isoformat())   # daily index
 
 
 def _poll(trackers: list[dict]):

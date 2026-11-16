@@ -137,6 +137,17 @@ def init_db():
             );
             CREATE INDEX IF NOT EXISTS idx_stats_tracker ON poll_stats(tracker_id, polled_at);
 
+            -- Stored hedonic price index per tracker and day (priceindex.py): written after each poll,
+            -- corrected retroactively once new listings have features/predictions.
+            CREATE TABLE IF NOT EXISTS price_index (
+                tracker_id  INTEGER NOT NULL REFERENCES trackers(id) ON DELETE CASCADE,
+                day         TEXT NOT NULL,
+                idx         REAL,               -- NULL: fewer than MIN_INDEX_N comparable listings
+                n           INTEGER NOT NULL,   -- listings that entered the index that day
+                computed_at TEXT NOT NULL,
+                PRIMARY KEY (tracker_id, day)
+            );
+
             -- ML "fair price": a feature set defines up to 30 named features (JSON list of
             -- {key,label,type}) for the listings of one tracker; values are extracted
             -- manually by an LLM agent and stored per listing; models are trained from them.
@@ -1237,6 +1248,23 @@ def get_gap_days() -> dict[int, set[str]]:
     for tid, day, found, ok in rows:
         if found >= PROBLEM_MIN_ADS and ok < PROBLEM_RATIO * found:
             out.setdefault(tid, set()).add(day)
+    return out
+
+
+def save_price_index(tracker_id: int, rows: list[tuple], since: str | None = None):
+    """Replace the stored index rows (tracker_id, day, idx, n, computed_at) of a tracker from `since` on."""
+    with get_db() as conn:
+        conn.execute('DELETE FROM price_index WHERE tracker_id = ? AND day >= ?', (tracker_id, since or ''))
+        conn.executemany('INSERT OR REPLACE INTO price_index VALUES (?, ?, ?, ?, ?)', rows)
+
+
+def get_price_index() -> dict[int, dict[str, float | None]]:
+    """tracker_id → {day: index (None = too few listings)}."""
+    with get_db() as conn:
+        rows = conn.execute('SELECT tracker_id, day, idx FROM price_index').fetchall()
+    out: dict[int, dict] = {}
+    for tid, day, idx in rows:
+        out.setdefault(tid, {})[day] = idx
     return out
 
 

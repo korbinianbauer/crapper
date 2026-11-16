@@ -730,7 +730,24 @@ def refresh_predictions(feature_set_id: int, listing_ids=None) -> int:
             for r in db.get_training_rows(feature_set_id)
             if r['listing_id'] in fair and (wanted is None or r['listing_id'] in wanted)}
     db.save_listing_predictions(feature_set_id, mid, rows, replace_all=wanted is None)
+    _correct_price_index(wanted)
     return len(rows)
+
+
+def _correct_price_index(listing_ids=None):
+    """New/changed fair prices alter the stored price index retroactively: recompute it from the first
+    price observation of the affected listings (all days when the whole model changed)."""
+    import priceindex
+    since = None
+    if listing_ids is not None and not listing_ids:
+        return
+    if listing_ids:
+        with db.get_db() as conn:
+            q = ','.join('?' * len(listing_ids))
+            row = conn.execute(f'SELECT MIN(substr(observed_at, 1, 10)) FROM price_history '
+                               f'WHERE listing_id IN ({q})', list(listing_ids)).fetchone()
+        since = row[0] if row and row[0] else None
+    priceindex.safe_recompute(since=since)
 
 
 _IMPACT_CACHE = {}

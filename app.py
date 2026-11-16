@@ -26,6 +26,7 @@ import archive
 import pagearchive
 import db
 import ml
+import priceindex
 import sources
 from poller import poll_trackers
 from sources.base import FetchFailed, RateLimited
@@ -199,53 +200,25 @@ def _median_price(cards: list[dict]) -> float | None:
     return statistics.median(prices) if prices else None
 
 
-_IDX_CACHE: dict = {}
-MIN_INDEX_N = 3             # fewer comparable listings on a day → no index value
-
-
-def _index_series(card: dict, fair: dict | None):
-    """(start, end, [(day, price/fair)], model trained_at) of one listing for the model-based index.
-    The ratio is the *normalised* asking price (rents incl. Nebenkosten/Heizung …, `ml.effective_price`)
-    divided by the raw model prediction. Implausible prices (excluded from training) are skipped."""
-    if not fair or not fair.get('raw'):
-        return None
-    key = (card['id'], fair.get('model_id'), len(card['history']))
-    pts = _IDX_CACHE.get(key)
-    if pts is None:
-        cm = ml.cost_models_for(fair.get('model_id'))
-        pts, memo = [], {}
-        for h in card['history']:
-            p = h['price']
-            if p is not None and p not in memo:
-                v = None
-                if ml.is_plausible(p, fair['features'], fair['per'], fair.get('per_range')):
-                    v = ml.effective_price(p, fair.get('cost'), fair['features'], fair.get('assume'), cm) or p
-                memo[p] = v / fair['raw'] if v else None
-            pts.append((date.fromisoformat(h['t'][:10]), None if p is None else memo[p]))
-        _IDX_CACHE[key] = pts
-    if not any(x[1] is not None for x in pts):
-        return None
-    # `end` depends on today / last_seen, so it must NOT be cached with the points
-    end = date.today() if card.get('active', True) else \
-        min(date.today(), date.fromisoformat((card.get('last_seen') or '')[:10] or date.today().isoformat()))
-    return (pts[0][0], max(end, pts[0][0]), pts, fair.get('trained_at'))
-
-
 def _price_index(items: list[dict], fair_map: dict, today: date | None = None,
-                 gap_days: set[str] | None = None) -> dict:
-    """Hedonic price index from the fair-price (gradient boosting) model(s).
+                 gap_days: set[str] | None = None, stored: dict | None = None) -> dict:
+    """Chart data of a tracker: hedonic price index (left axis) + median asking price (right axis).
 
-    Per day: geometric mean of (normalised asking price / model fair price) over all listings alive that
-    day (prices forward-filled between observations; a listing counts until the day it was last seen).
-    The model is fitted on the stock at its training time, so the index is ~1.0 (= 100) there; before
-    and after it shows how the quality-adjusted price level of the stock moved. The model's own
-    prediction is the denominator, so changes in the mix of listings (bigger, newer … flats) do not
-    move the index, unlike a plain median.
-    Returns `{'points': [{'t', 'index', 'median'}], 'trained': ['YYYY-MM-DD', …]}`; `median` is the median
-    asking price of the listings alive that day (price level, shown on the right axis)."""
+    `index` comes from the table `price_index` (`stored`: day → value, written after each poll and
+    corrected retroactively, see priceindex.py); without stored values it is computed on the fly.
+    `median` is the median asking price of the listings alive that day (prices forward-filled
+    between observations; a listing counts until the day it was last seen).
+    Returns `{'points': [{'t', 'index', 'median'}], 'trained': ['YYYY-MM-DD', …]}`."""
     today = today or date.today()
     gap_days = gap_days or set()
-    series = [x for x in (_index_series(it, fair_map.get(it['id'])) for it in items) if x]
+    if stored:
+        idx = stored
+        trained = sorted({(fair_map[it['id']].get('trained_at') or '')[:10] for it in items
+                          if fair_map.get(it['id']) and fair_map[it['id']].get('raw')
+                          and fair_map[it['id']].get('trained_at')})
+    else:
+        live, trained = priceindex.index_by_day(items, fair_map, today)
+        idx = {d: v[0] for d, v in live.items()}
     raw = []                                       # (start, end, [(day, price)]) for the median
     for it in items:
         pts = [(date.fromisoformat(h['t'][:10]), h['price']) for h in it['history'] if h['price'] is not None]
@@ -253,10 +226,10 @@ def _price_index(items: list[dict], fair_map: dict, today: date | None = None,
             end = today if it.get('active', True) else \
                 min(today, date.fromisoformat((it.get('last_seen') or '')[:10] or today.isoformat()))
             raw.append((pts[0][0], max(end, pts[0][0]), pts))
-    if not series and not raw:
+    firsts = [pts[0][0] for _, _, pts in raw] + [date.fromisoformat(d) for d in idx]
+    if not firsts:
         return {'points': [], 'trained': []}
-
-    first = min(s[0] for s in series + raw)
+    first = min(firsts)
     days = [first + timedelta(d) for d in range((today - first).days + 1)]
 
     def at(pts, day, cache):
@@ -270,23 +243,15 @@ def _price_index(items: list[dict], fair_map: dict, today: date | None = None,
         v = [x for x in vals if x is not None and x >= MIN_INDEX_PRICE]
         return statistics.median(v) if v else None
 
-    sc, rc = [[0] for _ in series], [[0] for _ in raw]
+    rc = [[0] for _ in raw]
     out = []
     for day in days:
-        logs = []
-        for (start, end, pts, _), c in zip(series, sc):
-            if start <= day <= end:
-                r = at(pts, day, c)
-                if r:
-                    logs.append(math.log(r))
         prices = [at(pts, day, c) for (start, end, pts), c in zip(raw, rc) if start <= day <= end]
         iso = day.isoformat()
-        out.append({'t': iso,
-                    'index': math.exp(sum(logs) / len(logs)) if len(logs) >= MIN_INDEX_N else None,
+        out.append({'t': iso, 'index': idx.get(iso),
                     'median': None if iso in gap_days else med(prices)})
     while out and out[0]['index'] is None and out[0]['median'] is None:
         out.pop(0)
-    trained = sorted({(x[3] or '')[:10] for x in series if x[3]})
     return {'points': out, 'trained': trained}
 
 
@@ -441,6 +406,7 @@ def index(tracker_id):
     counts = db.get_tracker_listing_counts()
     problems = db.get_price_problems()
     gaps = db.get_gap_days()
+    stored_idx = db.get_price_index()
     tracker_cards = []
     for t in trackers:
         t['listing_count'] = counts.get(t['id'], 0)
@@ -476,7 +442,8 @@ def index(tracker_id):
             'price_problem': problems.get(t['id']) or next(
                 (problems[m['id']] for m in members if m['id'] in problems), None),
             'trend': _price_index([cards[i] for i in ids], fair_map,
-                                  gap_days=set().union(*(gaps.get(i, set()) for i in [t['id']] + [m['id'] for m in members]))),
+                                  gap_days=set().union(*(gaps.get(i, set()) for i in [t['id']] + [m['id'] for m in members])),
+                                  stored=stored_idx.get(t['id'])),
         })
 
     hidden = [{
