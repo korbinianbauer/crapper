@@ -108,7 +108,6 @@ def archive_full_images(source, urls):
             archive.download_image(u, store_as=full)   # no larger variant available: the small one stands in
 
 
-DETAIL_INTERVAL = timedelta(hours=20)    # "at least daily" with slack for poll jitter
 
 # Ad-page fetches of a source are paced by one persistent interval: the time between
 # two requests. It grows after every 403/429 and shrinks after every successful fetch
@@ -383,8 +382,7 @@ def _poll(trackers: list[dict]):
               lambda t=t, src=src: _poll_listing_tracker(t, src, ads.get(t['id'], (None,))[0]))
              for t, src in singles]
     try:
-        cutoff = (datetime.utcnow() - DETAIL_INTERVAL).isoformat()
-        due = db.detail_queue(jobs, cutoff)
+        due = db.detail_queue(jobs)
         per_tracker = Counter(t for lid in due for t in jobs[lid].trackers)
         for tid, st in stats.items():
             logger.info('Search tracker %d: %d of %d ad pages due for fetching',
@@ -461,10 +459,12 @@ def _poll_search_tracker(tracker: dict, source, jobs: dict) -> dict:
     for r in results:
         lid = _upsert(source, r, seen_at)
         db.link_listing(tracker['id'], lid, seen_at)
+        db.note_search_card(lid, r.title, r.location, r.image_url)   # changed card → full page due
         has_price = r.price is not None or bool(r.price_text)
         if has_price:
             priced += 1
-            db.add_price(lid, seen_at, r.price, r.price_text)
+            if db.add_price(lid, seen_at, r.price, r.price_text):    # price changed → full page due
+                db.mark_detail_dirty(lid)
         if source.archive_details:
             job = jobs.setdefault(lid, _DetailJob(source, lid, r.url, seen_at))
             job.trackers.add(tracker['id'])

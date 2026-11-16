@@ -210,6 +210,8 @@ def init_db():
             'hidden': 'INTEGER NOT NULL DEFAULT 0',   # hidden from the frontpage by the user
             'detail_at': 'TEXT',                      # last full-page archive (ISO UTC)
             'detail_tried_at': 'TEXT',                # last full-page fetch attempt, ok or not
+            'search_sig': 'TEXT',                     # hash of title/location/image as the SEARCH card showed it last
+            'detail_dirty': 'INTEGER NOT NULL DEFAULT 0',  # search card or price changed since the last full-page archive
             'image_file': 'TEXT',                     # locally archived copy of image_url
         })
         _add_columns_if_missing(conn, 'listing_versions', {
@@ -1196,7 +1198,7 @@ def add_price(listing_id: int, observed_at: str, price: float | None, price_text
     not find a price element" (layout change, partial page) — not "the price was
     removed" — so it is not stored; the last known price stays valid."""
     if price is None and not price_text:
-        return
+        return False
     with get_db() as conn:
         last = conn.execute(
             'SELECT price, price_text FROM price_history WHERE listing_id = ? '
@@ -1204,13 +1206,18 @@ def add_price(listing_id: int, observed_at: str, price: float | None, price_text
             (listing_id,),
         ).fetchone()
         if last and last[0] == price and last[1] == price_text:
-            return
+            return False
         conn.execute(
             'INSERT INTO price_history (listing_id, observed_at, price, price_text) '
             'VALUES (?, ?, ?, ?)',
             (listing_id, observed_at, price, price_text),
         )
+        return last is not None      # True: the price CHANGED (not just the first observation)
 
+
+DETAIL_NEW_DAYS = 7                       # full ad page every day during the first 7 days after first seen …
+DETAIL_INTERVAL_NEW = timedelta(hours=20)  # … ("at least daily" with slack for poll jitter)
+DETAIL_INTERVAL_OLD = timedelta(days=7) - timedelta(hours=4)   # … then weekly, or earlier when the search card/price changed
 
 PROBLEM_RATIO = 0.5      # below this share of priced ads a poll counts as a price-extraction failure
 PROBLEM_MIN_ADS = 5      # ignore tiny searches
@@ -1292,11 +1299,17 @@ def get_price_history_map() -> dict[int, list[dict]]:
     return out
 
 
-def detail_queue(listing_ids, older_than: str) -> list[int]:
-    """Those of *listing_ids* whose full ad page is due (never archived or not since
-    *older_than*), least recently *attempted* first (never attempted before all).
+def detail_queue(listing_ids, now: datetime | None = None) -> list[int]:
+    """Those of *listing_ids* whose full ad page is due, least recently *attempted* first (never
+    attempted before all). Due: never archived; or changed since (`detail_dirty`: price or the
+    search card's title/location/image differ); or younger than `DETAIL_NEW_DAYS` (first seen) and not
+    archived for `DETAIL_INTERVAL_NEW`; or older and not archived for `DETAIL_INTERVAL_OLD`.
     Sorting by attempt, not success, gives a round-robin: an ad whose page keeps
     failing moves to the back instead of eating the request budget every run."""
+    now = now or datetime.utcnow()
+    daily = (now - DETAIL_INTERVAL_NEW).isoformat()
+    weekly = (now - DETAIL_INTERVAL_OLD).isoformat()
+    new_since = (now - timedelta(days=DETAIL_NEW_DAYS)).isoformat()
     ids = list(dict.fromkeys(listing_ids))
     due = []
     with get_db() as conn:
@@ -1305,10 +1318,29 @@ def detail_queue(listing_ids, older_than: str) -> list[int]:
             due += conn.execute(
                 f'''SELECT id, detail_tried_at FROM listings
                      WHERE id IN ({",".join("?" * len(chunk))})
-                       AND (detail_at IS NULL OR detail_at < ?)''',
-                (*chunk, older_than)).fetchall()
+                       AND (detail_at IS NULL OR detail_dirty = 1
+                            OR (first_seen >= ? AND detail_at < ?)
+                            OR detail_at < ?)''',
+                (*chunk, new_since, daily, weekly)).fetchall()
     due.sort(key=lambda r: (r[1] is not None, r[1] or ''))
     return [r[0] for r in due]
+
+
+def note_search_card(listing_id: int, title, location, image_url):
+    """Remember what the search card showed; a change against the previous card marks the
+    listing's full page as due (`detail_dirty`). Compared with the previous *search card*, never with
+    the full page, whose fields differ slightly and would flip-flop."""
+    sig = hashlib.sha256(json.dumps([_clean(title), _clean(location), _clean_img(image_url)],
+                                    ensure_ascii=False).encode()).hexdigest()
+    with get_db() as conn:
+        conn.execute('UPDATE listings SET search_sig = ?, '
+                     'detail_dirty = CASE WHEN search_sig IS NOT NULL AND search_sig != ? THEN 1 ELSE detail_dirty END '
+                     'WHERE id = ?', (sig, sig, listing_id))
+
+
+def mark_detail_dirty(listing_id: int):
+    with get_db() as conn:
+        conn.execute('UPDATE listings SET detail_dirty = 1 WHERE id = ?', (listing_id,))
 
 
 def listing_tracker_ads(tracker_ids) -> dict[int, tuple[int, str | None]]:
@@ -1332,5 +1364,5 @@ def mark_detail_tried(listing_id: int, at: str):
 
 def mark_detail(listing_id: int, at: str):
     with get_db() as conn:
-        conn.execute('UPDATE listings SET detail_at = ?, detail_tried_at = ? WHERE id = ?',
+        conn.execute('UPDATE listings SET detail_at = ?, detail_tried_at = ?, detail_dirty = 0 WHERE id = ?',
                      (at, at, listing_id))
